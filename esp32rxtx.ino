@@ -1,74 +1,127 @@
 #include <Arduino.h>
 
-// Pin default untuk UART pada ESP32:
-// RX: GPIO3 (pin fisik RXD0)
-// TX: GPIO1 (pin fisik TXD0)
+// Pilih salah satu UART untuk komunikasi dengan Raspberry Pi
+#define USE_UART0 true   // Set true untuk menggunakan UART0 (Serial)
+#define USE_UART2 false  // Set true untuk menggunakan UART2
 
-// Atau menggunakan UART2:
-// RX: GPIO16
-// TX: GPIO17
-// Anda bisa mengganti dengan pin lain jika diperlukan
+// Pin untuk UART2 (jika digunakan)
+#define RXD2 16
+#define TXD2 17
 
-#define RXD2 16  // Pin RX untuk UART2 (opsional)
-#define TXD2 17  // Pin TX untuk UART2 (opsional)
+// Untuk debugging
+#define DEBUG_BAUD 115200
+
+// LED built-in untuk indikator visual
+#define LED_PIN 2
 
 void setup() {
-  // Inisialisasi Serial untuk debugging melalui monitor serial Arduino IDE
-  Serial.begin(115200);
+  // LED untuk indikator visual
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
   
-  // Inisialisasi Serial2 untuk komunikasi dengan Raspberry Pi
-  // Gunakan salah satu dari berikut:
+  // Inisialisasi Serial untuk komunikasi dengan Raspberry Pi
+  if (USE_UART0) {
+    Serial.begin(115200);
+    Serial.setTimeout(50);  // Timeout untuk readString/readStringUntil
+  }
   
-  // 1. Menggunakan UART0 (default):
-  // Serial.begin(115200); // Sudah diinisialisasi di atas
+  // Inisialisasi Serial2 jika digunakan
+  if (USE_UART2) {
+    Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+    Serial2.setTimeout(50);  // Timeout untuk readString/readStringUntil
+    
+    // Gunakan Serial untuk debugging saja
+    Serial.begin(DEBUG_BAUD);
+    Serial.println("ESP32 menggunakan UART2 untuk komunikasi dengan Raspberry Pi");
+  } else if (!USE_UART0) {
+    // Jika tidak menggunakan UART sama sekali
+    Serial.begin(DEBUG_BAUD);
+    Serial.println("ESP32 tidak menggunakan UART");
+  }
   
-  // 2. Atau menggunakan UART2:
-  // Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  // Tambahkan delay startup untuk stabilitas
+  delay(1000);
   
-  Serial.println("ESP32 siap berkomunikasi dengan Raspberry Pi");
+  // Bersihkan buffer serial
+  while (Serial.available()) {
+    Serial.read();
+  }
+  
+  if (USE_UART2) {
+    while (Serial2.available()) {
+      Serial2.read();
+    }
+  }
+  
+  // Kirim pesan startup
+  if (USE_UART0) {
+    Serial.println("ESP32 siap berkomunikasi dengan Raspberry Pi");
+  } else if (USE_UART2) {
+    Serial2.println("ESP32 siap berkomunikasi dengan Raspberry Pi");
+    Serial.println("Pesan siap terkirim ke Raspberry Pi");
+  }
+  
+  // Flash LED sebagai indikator bahwa setup selesai
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_PIN, LOW);
+    delay(100);
+  }
 }
 
 void loop() {
-  // Menerima data dari Raspberry Pi
-  if (Serial.available() > 0) {
+  // Indikasi bahwa masih hidup
+  static unsigned long lastBlink = 0;
+  if (millis() - lastBlink > 2000) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(50);
+    digitalWrite(LED_PIN, LOW);
+    lastBlink = millis();
+  }
+  
+  // UART0: Menerima data dari Raspberry Pi
+  if (USE_UART0 && Serial.available() > 0) {
     String receivedData = Serial.readStringUntil('\n');
+    receivedData.trim();  // Hapus whitespace dan newline
     
-    // Tampilkan data yang diterima untuk debugging
-    Serial.print("Data diterima dari Raspberry Pi: ");
-    Serial.println(receivedData);
+    // Flash LED sebagai indikator data diterima
+    digitalWrite(LED_PIN, HIGH);
     
-    // Proses data jika diperlukan
-    // ...
+    // Cek apakah data valid
+    if (receivedData.length() > 0) {
+      // Kirim respons kembali ke Raspberry Pi
+      String response = "ESP32 menerima: " + receivedData;
+      Serial.println(response);
+    }
     
-    // Kirim respons kembali ke Raspberry Pi
-    String response = "ESP32 menerima: " + receivedData;
-    Serial.println(response);
+    digitalWrite(LED_PIN, LOW);
   }
   
-  // Delay kecil untuk stabilitas
-  delay(10);
-}
-
-// Versi alternatif menggunakan UART2
-/*
-void loop() {
-  // Menerima data dari Raspberry Pi
-  if (Serial2.available() > 0) {
+  // UART2: Menerima data dari Raspberry Pi (jika digunakan)
+  if (USE_UART2 && Serial2.available() > 0) {
     String receivedData = Serial2.readStringUntil('\n');
+    receivedData.trim();  // Hapus whitespace dan newline
     
-    // Tampilkan data yang diterima untuk debugging melalui Serial0
-    Serial.print("Data diterima dari Raspberry Pi: ");
-    Serial.println(receivedData);
+    // Flash LED sebagai indikator data diterima
+    digitalWrite(LED_PIN, HIGH);
     
-    // Proses data jika diperlukan
-    // ...
+    // Debug: Print data yang diterima ke Serial
+    Serial.print("Data diterima dari Raspberry Pi: '");
+    Serial.print(receivedData);
+    Serial.println("'");
     
-    // Kirim respons kembali ke Raspberry Pi
-    String response = "ESP32 menerima: " + receivedData;
-    Serial2.println(response);
+    // Cek apakah data valid
+    if (receivedData.length() > 0) {
+      // Kirim respons kembali ke Raspberry Pi
+      String response = "ESP32 menerima: " + receivedData;
+      Serial2.println(response);
+      Serial.println("Respons terkirim: " + response);
+    }
+    
+    digitalWrite(LED_PIN, LOW);
   }
   
   // Delay kecil untuk stabilitas
   delay(10);
 }
-*/
