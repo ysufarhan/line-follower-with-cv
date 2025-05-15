@@ -1,0 +1,74 @@
+#include <Arduino.h>
+
+// Pin default untuk UART pada ESP32:
+// RX: GPIO3 (pin fisik RXD0)
+// TX: GPIO1 (pin fisik TXD0)
+
+// Atau menggunakan UART2:
+// RX: GPIO16
+// TX: GPIO17
+// Anda bisa mengganti dengan pin lain jika diperlukan
+
+#define RXD2 16  // Pin RX untuk UART2 (opsional)
+#define TXD2 17  // Pin TX untuk UART2 (opsional)
+
+void setup() {
+  // Inisialisasi Serial untuk debugging melalui monitor serial Arduino IDE
+  Serial.begin(115200);
+  
+  // Inisialisasi Serial2 untuk komunikasi dengan Raspberry Pi
+  // Gunakan salah satu dari berikut:
+  
+  // 1. Menggunakan UART0 (default):
+  // Serial.begin(115200); // Sudah diinisialisasi di atas
+  
+  // 2. Atau menggunakan UART2:
+  // Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  
+  Serial.println("ESP32 siap berkomunikasi dengan Raspberry Pi");
+}
+
+void loop() {
+  // Menerima data dari Raspberry Pi
+  if (Serial.available() > 0) {
+    String receivedData = Serial.readStringUntil('\n');
+    
+    // Tampilkan data yang diterima untuk debugging
+    Serial.print("Data diterima dari Raspberry Pi: ");
+    Serial.println(receivedData);
+    
+    // Proses data jika diperlukan
+    // ...
+    
+    // Kirim respons kembali ke Raspberry Pi
+    String response = "ESP32 menerima: " + receivedData;
+    Serial.println(response);
+  }
+  
+  // Delay kecil untuk stabilitas
+  delay(10);
+}
+
+// Versi alternatif menggunakan UART2
+/*
+void loop() {
+  // Menerima data dari Raspberry Pi
+  if (Serial2.available() > 0) {
+    String receivedData = Serial2.readStringUntil('\n');
+    
+    // Tampilkan data yang diterima untuk debugging melalui Serial0
+    Serial.print("Data diterima dari Raspberry Pi: ");
+    Serial.println(receivedData);
+    
+    // Proses data jika diperlukan
+    // ...
+    
+    // Kirim respons kembali ke Raspberry Pi
+    String response = "ESP32 menerima: " + receivedData;
+    Serial2.println(response);
+  }
+  
+  // Delay kecil untuk stabilitas
+  delay(10);
+}
+*/
