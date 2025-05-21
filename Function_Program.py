@@ -5,6 +5,7 @@ import time
 import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+from datetime import datetime
 
 def setup_fuzzy_logic():
     """
@@ -68,7 +69,8 @@ def setup_serial():
     Konfigurasi dan inisialisasi komunikasi serial
     """
     try:
-        ser = serial.Serial('/dev/serial0', 115200)
+        ser = serial.Serial('/dev/serial0', 115200, timeout=1)
+        print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
         print(f"[UART ERROR] Gagal membuka serial port: {e}")
@@ -79,9 +81,10 @@ def process_image(frame):
     Memproses frame untuk mendeteksi jalur/garis
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
-    # ROI bagian bawah (tempat jalur biasanya terlihat)
+    # ROI bagian bawah
     roi = binary[180:240, :]
     
     return gray, binary, roi
@@ -94,7 +97,7 @@ def calculate_line_position(roi):
     
     if M['m00'] != 0:
         cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 180  # Tambah offset karena ROI
+        cy = int(M['m01'] / M['m00']) + 180
         return True, cx, cy
     else:
         return False, 0, 0
@@ -108,7 +111,7 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
         fuzzy_ctrl.input['delta'] = delta_error
         fuzzy_ctrl.compute()
         kontrol = int(fuzzy_ctrl.output['output'])
-        print(f"[LOG] Error: {error_val} | Delta: {delta_error} | Output Fuzzy: {kontrol}")
+        print(f"[FLC] Error: {error_val:4d} | Delta: {delta_error:4d} | Output: {kontrol:4d}")
         return kontrol
     except Exception as e:
         print(f"[FLC ERROR] {e}")
@@ -121,9 +124,12 @@ def calculate_motor_pwm(kontrol, base_pwm=60):
     pwm_kiri = base_pwm - kontrol
     pwm_kanan = base_pwm + kontrol
     
-    # Batasi PWM ke 0–100
+    # Batasi PWM ke 0-100
     pwm_kiri = max(0, min(100, pwm_kiri))
     pwm_kanan = max(0, min(100, pwm_kanan))
+    
+    # Print output PWM
+    print(f"[PWM] Kiri: {pwm_kiri:3d}% | Kanan: {pwm_kanan:3d}%")
     
     return int(pwm_kiri), int(pwm_kanan)
 
@@ -133,9 +139,12 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
     """
     if ser:
         try:
-            ser.write(f"{pwm_kiri},{pwm_kanan}\n".encode())
+            cmd = f"{pwm_kiri},{pwm_kanan}\n"
+            ser.write(cmd.encode())
+            ser.flush()
+            print(f"[UART] Sent: {cmd.strip()}")
         except Exception as e:
-            print(f"[SERIAL WRITE ERROR] {e}")
+            print(f"[SERIAL ERROR] {e}")
 
 def visualize_tracking(frame, line_detected, cx=0, cy=0, error_val=0, kontrol=0):
     """
@@ -157,13 +166,17 @@ def main():
     Fungsi utama program
     """
     # Setup komponen
+    print("Inisialisasi sistem...")
     fuzzy_ctrl = setup_fuzzy_logic()
     picam2 = setup_camera()
     ser = setup_serial()
     
     prev_error = 0
+    line_lost_timeout = 0
+    MAX_LOST_TIME = 2.0
     
     try:
+        print("Memulai loop utama...")
         while True:
             # Ambil dan proses gambar
             frame = picam2.capture_array()
@@ -173,6 +186,7 @@ def main():
             line_detected, cx, cy = calculate_line_position(roi)
             
             if line_detected:
+                line_lost_timeout = 0
                 # Hitung error dan kontrol
                 error_val = cx - 160
                 delta_error = error_val - prev_error
@@ -188,8 +202,10 @@ def main():
                 
                 prev_error = error_val
             else:
-                # Garis tidak terdeteksi, robot berhenti
-                send_motor_commands(ser, 0, 0)
+                line_lost_timeout += 0.05
+                if line_lost_timeout >= MAX_LOST_TIME:
+                    send_motor_commands(ser, 0, 0)
+                    print("[WARN] Garis hilang, motor dihentikan")
                 kontrol = 0
                 error_val = 0
             
@@ -204,14 +220,17 @@ def main():
             time.sleep(0.05)
             
     except KeyboardInterrupt:
-        print("Dihentikan oleh pengguna")
+        print("\nDihentikan oleh pengguna")
     
     finally:
         # Cleanup
+        print("Membersihkan sumber daya...")
+        send_motor_commands(ser, 0, 0)
         cv2.destroyAllWindows()
         picam2.stop()
         if ser:
             ser.close()
+        print("Program selesai")
 
 if __name__ == "__main__":
     main()
