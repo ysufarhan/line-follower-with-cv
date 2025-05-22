@@ -36,36 +36,37 @@ def setup_fuzzy_logic():
     output['R']  = fuzz.trimf(output.universe, [40, 100, 100])   # Right
     
     # Definisikan rule base LENGKAP - 25 rules untuk sistem 5x5
+    # LOGIKA DIPERBAIKI: Output negatif = belok kiri, Output positif = belok kanan
     rules = [
-        # Error NL (Negative Large)
+        # Error NL (garis jauh di kiri) -> harus belok kiri keras -> output negatif besar
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),   # Belok kiri keras
         ctrl.Rule(error['NL'] & delta['NS'], output['L']),   
         ctrl.Rule(error['NL'] & delta['Z'], output['L']),    
         ctrl.Rule(error['NL'] & delta['PS'], output['LS']),  
         ctrl.Rule(error['NL'] & delta['PL'], output['LS']),  
         
-        # Error NS (Negative Small)
+        # Error NS (garis agak di kiri) -> harus belok kiri -> output negatif
         ctrl.Rule(error['NS'] & delta['NL'], output['L']),   
         ctrl.Rule(error['NS'] & delta['NS'], output['LS']),  
         ctrl.Rule(error['NS'] & delta['Z'], output['LS']),   
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),   
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),  
         
-        # Error Z (Zero) - PENTING untuk jalan lurus
+        # Error Z (garis di tengah) -> jalan lurus -> output nol
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']),   
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),    
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),     # LURUS - output nol
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),    
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']),   
         
-        # Error PS (Positive Small)
+        # Error PS (garis agak di kanan) -> harus belok kanan -> output positif
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),  
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),   
         ctrl.Rule(error['PS'] & delta['Z'], output['RS']),   
         ctrl.Rule(error['PS'] & delta['PS'], output['RS']),  
         ctrl.Rule(error['PS'] & delta['PL'], output['R']),   
         
-        # Error PL (Positive Large)
+        # Error PL (garis jauh di kanan) -> harus belok kanan keras -> output positif besar
         ctrl.Rule(error['PL'] & delta['NL'], output['RS']),  
         ctrl.Rule(error['PL'] & delta['NS'], output['RS']),  
         ctrl.Rule(error['PL'] & delta['Z'], output['R']),    
@@ -163,20 +164,34 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
 
 def calculate_motor_pwm(kontrol, base_pwm=45):  # DITURUNKAN dari 65 ke 45
     """
-    Menghitung PWM untuk motor berdasarkan nilai kontrol - DIPERBAIKI
+    Menghitung PWM untuk motor berdasarkan nilai kontrol - LOGIKA DIPERBAIKI
+    
+    Logika yang benar:
+    - Error negatif (garis di kiri) -> robot harus belok kiri -> PWM kanan > PWM kiri
+    - Error positif (garis di kanan) -> robot harus belok kanan -> PWM kiri > PWM kanan
+    - Kontrol negatif = belok kiri, Kontrol positif = belok kanan
     """
     # Scaling factor untuk kontrol yang lebih halus
     kontrol_scaled = kontrol * 0.3  # DITURUNKAN dari 0.4 ke 0.3 untuk lebih smooth
     
-    pwm_kiri = base_pwm - kontrol_scaled
-    pwm_kanan = base_pwm + kontrol_scaled
+    # LOGIKA DIPERBAIKI: 
+    # Kontrol negatif (belok kiri) -> PWM kiri dikurangi, PWM kanan ditambah
+    # Kontrol positif (belok kanan) -> PWM kiri ditambah, PWM kanan dikurangi
+    pwm_kiri = base_pwm + kontrol_scaled   # DIBALIK: dulu dikurangi, sekarang ditambah
+    pwm_kanan = base_pwm - kontrol_scaled  # DIBALIK: dulu ditambah, sekarang dikurangi
     
     # Batasi PWM ke rentang yang lebih rendah untuk kecepatan lambat
     pwm_kiri = max(0, min(80, pwm_kiri))   # Max 80% bukan 100%
     pwm_kanan = max(0, min(80, pwm_kanan)) # Max 80% bukan 100%
     
-    # Print output PWM dengan lebih detail
-    print(f"[PWM] Kontrol: {kontrol:6.2f} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
+    # Print output PWM dengan lebih detail dan penjelasan arah
+    arah = "LURUS"
+    if kontrol_scaled < -5:
+        arah = "KIRI"
+    elif kontrol_scaled > 5:
+        arah = "KANAN"
+    
+    print(f"[PWM] Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
     
     return int(pwm_kiri), int(pwm_kanan)
 
