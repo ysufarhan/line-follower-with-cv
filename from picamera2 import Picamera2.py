@@ -7,71 +7,91 @@ import skfuzzy as fuzz
 from skfuzzy import control as ctrl
 from datetime import datetime
 
+class ErrorFilter:
+    """
+    Filter untuk menstabilkan error yang berfluktuasi
+    """
+    def __init__(self, window_size=3):
+        self.window_size = window_size
+        self.error_history = []
+    
+    def filter_error(self, error):
+        """Filter error dengan moving average"""
+        self.error_history.append(error)
+        if len(self.error_history) > self.window_size:
+            self.error_history.pop(0)
+        
+        # Return rata-rata untuk smooth error
+        filtered_error = sum(self.error_history) / len(self.error_history)
+        return int(filtered_error)
+
 def setup_fuzzy_logic():
     """
-    Konfigurasi sistem fuzzy logic untuk kontrol robot - DIPERBAIKI
+    Konfigurasi sistem fuzzy logic untuk kontrol robot - DIPERBAIKI TOTAL
     """
     # Buat variabel fuzzy
     error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
     output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
     
-    # Definisikan membership functions - DIPERBAIKI dengan dead zone yang lebih besar
-    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -60])  # Negative Large
-    error['NS'] = fuzz.trimf(error.universe, [-100, -40, 0])    # Negative Small
-    error['Z']  = fuzz.trimf(error.universe, [-25, 0, 25])      # Zero - diperluas untuk stabilitas
-    error['PS'] = fuzz.trimf(error.universe, [0, 40, 100])     # Positive Small
-    error['PL'] = fuzz.trimf(error.universe, [60, 160, 160])   # Positive Large
+    # MEMBERSHIP FUNCTIONS DIPERBAIKI - lebih smooth dan stabil
+    # Error - diperluas dead zone untuk stabilitas
+    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -80])   # Negative Large
+    error['NS'] = fuzz.trimf(error.universe, [-120, -50, -10])   # Negative Small  
+    error['Z']  = fuzz.trimf(error.universe, [-40, 0, 40])       # Zero - DIPERLUAS untuk stabilitas
+    error['PS'] = fuzz.trimf(error.universe, [10, 50, 120])      # Positive Small
+    error['PL'] = fuzz.trimf(error.universe, [80, 160, 160])     # Positive Large
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -40])
-    delta['NS'] = fuzz.trimf(delta.universe, [-60, -30, 0])
-    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])     # diperluas untuk stabilitas
-    delta['PS'] = fuzz.trimf(delta.universe, [0, 30, 60])
-    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 100])
+    # Delta error - lebih toleran terhadap noise
+    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -50])
+    delta['NS'] = fuzz.trimf(delta.universe, [-70, -25, -5])
+    delta['Z']  = fuzz.trimf(delta.universe, [-20, 0, 20])       # DIPERLUAS
+    delta['PS'] = fuzz.trimf(delta.universe, [5, 25, 70])
+    delta['PL'] = fuzz.trimf(delta.universe, [50, 100, 100])
 
-    output['L']  = fuzz.trimf(output.universe, [-100, -100, -40])  # Left
-    output['LS'] = fuzz.trimf(output.universe, [-60, -30, 0])     # Left Small
-    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])      # Zero - diperkecil untuk dead zone
-    output['RS'] = fuzz.trimf(output.universe, [0, 30, 60])      # Right Small
-    output['R']  = fuzz.trimf(output.universe, [40, 100, 100])   # Right
+    # Output - range lebih kecil untuk kontrol yang lebih halus
+    output['L']  = fuzz.trimf(output.universe, [-100, -100, -50])  # Left
+    output['LS'] = fuzz.trimf(output.universe, [-70, -35, -10])   # Left Small
+    output['Z']  = fuzz.trimf(output.universe, [-15, 0, 15])      # Zero - dead zone
+    output['RS'] = fuzz.trimf(output.universe, [10, 35, 70])     # Right Small
+    output['R']  = fuzz.trimf(output.universe, [50, 100, 100])   # Right
     
-    # Definisikan rule base LENGKAP - 25 rules untuk sistem 5x5
-    # LOGIKA DIPERBAIKI: Output negatif = belok kiri, Output positif = belok kanan
+    # RULE BASE DIPERBAIKI - lebih konservatif dan smooth
     rules = [
-        # Error NL (garis jauh di kiri) -> harus belok kiri keras -> output negatif besar
-        ctrl.Rule(error['NL'] & delta['NL'], output['L']),   # Belok kiri keras
-        ctrl.Rule(error['NL'] & delta['NS'], output['L']),   
-        ctrl.Rule(error['NL'] & delta['Z'], output['L']),    
-        ctrl.Rule(error['NL'] & delta['PS'], output['LS']),  
-        ctrl.Rule(error['NL'] & delta['PL'], output['LS']),  
+        # Error NL (garis jauh di kiri) -> belok kiri tapi tidak terlalu ekstrem
+        ctrl.Rule(error['NL'] & delta['NL'], output['L']),   
+        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),  # DIPERLEMBUT
+        ctrl.Rule(error['NL'] & delta['Z'], output['LS']),   # DIPERLEMBUT
+        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),   # DIPERLEMBUT
+        ctrl.Rule(error['NL'] & delta['PL'], output['Z']),   # DIPERLEMBUT
         
-        # Error NS (garis agak di kiri) -> harus belok kiri -> output negatif
-        ctrl.Rule(error['NS'] & delta['NL'], output['L']),   
+        # Error NS (garis agak di kiri) -> koreksi lembut
+        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),  
         ctrl.Rule(error['NS'] & delta['NS'], output['LS']),  
-        ctrl.Rule(error['NS'] & delta['Z'], output['LS']),   
+        ctrl.Rule(error['NS'] & delta['Z'], output['Z']),    # DIPERLEMBUT
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),   
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),  
         
-        # Error Z (garis di tengah) -> jalan lurus -> output nol
-        ctrl.Rule(error['Z'] & delta['NL'], output['LS']),   
+        # Error Z (garis di tengah) -> prioritas LURUS
+        ctrl.Rule(error['Z'] & delta['NL'], output['Z']),    # DIPERLEMBUT
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),    
-        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),     # LURUS - output nol
+        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),     # LURUS PRIORITAS
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),    
-        ctrl.Rule(error['Z'] & delta['PL'], output['RS']),   
+        ctrl.Rule(error['Z'] & delta['PL'], output['Z']),    # DIPERLEMBUT
         
-        # Error PS (garis agak di kanan) -> harus belok kanan -> output positif
+        # Error PS (garis agak di kanan) -> koreksi lembut
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),  
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),   
-        ctrl.Rule(error['PS'] & delta['Z'], output['RS']),   
+        ctrl.Rule(error['PS'] & delta['Z'], output['Z']),    # DIPERLEMBUT
         ctrl.Rule(error['PS'] & delta['PS'], output['RS']),  
-        ctrl.Rule(error['PS'] & delta['PL'], output['R']),   
+        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),  
         
-        # Error PL (garis jauh di kanan) -> harus belok kanan keras -> output positif besar
-        ctrl.Rule(error['PL'] & delta['NL'], output['RS']),  
-        ctrl.Rule(error['PL'] & delta['NS'], output['RS']),  
-        ctrl.Rule(error['PL'] & delta['Z'], output['R']),    
-        ctrl.Rule(error['PL'] & delta['PS'], output['R']),   
-        ctrl.Rule(error['PL'] & delta['PL'], output['R']),   # Belok kanan keras
+        # Error PL (garis jauh di kanan) -> belok kanan tapi tidak ekstrem
+        ctrl.Rule(error['PL'] & delta['NL'], output['Z']),   # DIPERLEMBUT
+        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),   # DIPERLEMBUT
+        ctrl.Rule(error['PL'] & delta['Z'], output['RS']),   # DIPERLEMBUT
+        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),  # DIPERLEMBUT
+        ctrl.Rule(error['PL'] & delta['PL'], output['R']),   
     ]
     
     # Buat sistem kontrol
@@ -104,7 +124,7 @@ def setup_serial():
 
 def process_image(frame, use_otsu=True):
     """
-    Memproses frame untuk mendeteksi jalur/garis - DIPERBAIKI
+    Memproses frame untuk mendeteksi jalur/garis
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -126,7 +146,7 @@ def process_image(frame, use_otsu=True):
 
 def calculate_line_position(roi):
     """
-    Menghitung posisi garis dari ROI menggunakan moments - DIPERBAIKI
+    Menghitung posisi garis dari ROI menggunakan moments
     """
     # Morphological operations untuk noise reduction
     kernel = np.ones((3,3), np.uint8)
@@ -142,14 +162,14 @@ def calculate_line_position(roi):
     else:
         return False, 0, 0
 
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15):
+def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=25):
     """
-    Menghitung output kontrol berdasarkan fuzzy logic dengan dead zone
+    Menghitung output kontrol berdasarkan fuzzy logic - DIPERBAIKI
     """
     try:
-        # DEAD ZONE - jika error sangat kecil, langsung return 0
-        if abs(error_val) <= dead_zone and abs(delta_error) <= 10:
-            print(f"[FLC] DEAD ZONE - Error: {error_val:4d} | Delta: {delta_error:4d} | Output: 0.00 (LURUS)")
+        # DEAD ZONE DIPERLUAS untuk stabilitas yang lebih baik
+        if abs(error_val) <= dead_zone and abs(delta_error) <= 15:
+            print(f"[FLC] DEAD ZONE BESAR - Error: {error_val:4d} | Delta: {delta_error:4d} | Output: 0.00 (LURUS STABIL)")
             return 0.0
         
         # Batasi input dalam range yang valid
@@ -161,9 +181,12 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15):
         fuzzy_ctrl.compute()
         kontrol = fuzzy_ctrl.output['output']
         
-        # Smooth output - hilangkan noise kecil
-        if abs(kontrol) < 5:
+        # SMOOTHING OUTPUT yang lebih agresif
+        if abs(kontrol) < 8:  # Diperbesar threshold
             kontrol = 0.0
+            
+        # FILTER TAMBAHAN - cegah perubahan drastis
+        kontrol = np.clip(kontrol, -80, 80)  # Batasi output maksimal
         
         print(f"[FLC] Error: {error_val:4d} | Delta: {delta_error:4d} | Output: {kontrol:6.2f}")
         return kontrol
@@ -171,44 +194,51 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15):
         print(f"[FLC ERROR] {e}")
         return 0
 
-def calculate_motor_pwm(kontrol, base_pwm=45):  # DITURUNKAN dari 65 ke 45
+def calculate_motor_pwm(kontrol, base_pwm=55):
     """
-    Menghitung PWM untuk motor berdasarkan nilai kontrol - LOGIKA DIPERBAIKI + DEAD ZONE
-    
-    Logika yang benar:
-    - Error negatif (garis di kiri) -> robot harus belok kiri -> PWM kanan > PWM kiri
-    - Error positif (garis di kanan) -> robot harus belok kanan -> PWM kiri > PWM kanan
-    - Kontrol negatif = belok kiri, Kontrol positif = belok kanan
+    Menghitung PWM untuk motor - ALGORITMA DIPERBAIKI TOTAL
     """
-    # Scaling factor untuk kontrol yang lebih halus
-    kontrol_scaled = kontrol * 0.3  # DITURUNKAN dari 0.4 ke 0.3 untuk lebih smooth
+    # SCALING DIPERBAIKI - jauh lebih halus dan progresif
+    if abs(kontrol) <= 10:
+        # Dead zone - tidak ada koreksi
+        kontrol_scaled = 0
+    elif abs(kontrol) <= 30:
+        # Koreksi kecil - scaling minimal
+        kontrol_scaled = kontrol * 0.08  # SANGAT KECIL untuk smooth
+    elif abs(kontrol) <= 60:
+        # Koreksi sedang - scaling bertahap
+        kontrol_scaled = kontrol * 0.12
+    else:
+        # Koreksi besar - scaling maksimal tapi terbatas
+        kontrol_scaled = kontrol * 0.15  # MAKSIMAL 15% dari base PWM
     
-    # DEAD ZONE untuk PWM - pastikan PWM sama ketika kontrol mendekati 0
-    if abs(kontrol_scaled) < 2:  # Threshold untuk PWM yang sama persis
+    # DEAD ZONE KETAT untuk PWM
+    if abs(kontrol_scaled) < 1:
         pwm_kiri = base_pwm
         pwm_kanan = base_pwm
         arah = "LURUS"
-        print(f"[PWM] DEAD ZONE - Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
+        status = "DEAD_ZONE"
     else:
-        # LOGIKA DIPERBAIKI: 
-        # Kontrol negatif (belok kiri) -> PWM kiri dikurangi, PWM kanan ditambah
-        # Kontrol positif (belok kanan) -> PWM kiri ditambah, PWM kanan dikurangi
-        pwm_kiri = base_pwm + kontrol_scaled   # DIBALIK: dulu dikurangi, sekarang ditambah
-        pwm_kanan = base_pwm - kontrol_scaled  # DIBALIK: dulu ditambah, sekarang dikurangi
+        # Aplikasi kontrol dengan batas yang ketat
+        pwm_kiri = base_pwm + kontrol_scaled   
+        pwm_kanan = base_pwm - kontrol_scaled  
         
-        # Tentukan arah berdasarkan kontrol
-        if kontrol_scaled < -2:
+        # Tentukan arah dan status
+        if kontrol_scaled < -1:
             arah = "KIRI"
-        elif kontrol_scaled > 2:
-            arah = "KANAN"
+            status = f"CTRL_{abs(kontrol_scaled):.1f}"
+        elif kontrol_scaled > 1:
+            arah = "KANAN" 
+            status = f"CTRL_{abs(kontrol_scaled):.1f}"
         else:
             arah = "LURUS"
-        
-        print(f"[PWM] Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
+            status = "MINIMAL"
     
-    # Batasi PWM ke rentang yang lebih rendah untuk kecepatan lambat
-    pwm_kiri = max(0, min(80, pwm_kiri))   # Max 80% bukan 100%
-    pwm_kanan = max(0, min(80, pwm_kanan)) # Max 80% bukan 100%
+    # BATASI PWM dengan range yang lebih ketat
+    pwm_kiri = max(30, min(75, pwm_kiri))   # Range 30-75% untuk stabilitas
+    pwm_kanan = max(30, min(75, pwm_kanan)) 
+    
+    print(f"[PWM] Kontrol: {kontrol:6.2f} | Scaled: {kontrol_scaled:5.2f} | {status:10s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
     
     return int(pwm_kiri), int(pwm_kanan)
 
@@ -227,7 +257,7 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
 
 def visualize_tracking(frame, line_detected, cx=0, cy=0, error_val=0, kontrol=0):
     """
-    Membuat visualisasi tracking pada frame - DIPERBAIKI
+    Membuat visualisasi tracking pada frame
     """
     # Gambar garis tengah referensi
     cv2.line(frame, (160, 0), (160, 240), (255, 0, 0), 2)
@@ -239,7 +269,7 @@ def visualize_tracking(frame, line_detected, cx=0, cy=0, error_val=0, kontrol=0)
         cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
         cv2.line(frame, (160, cy), (cx, cy), (0, 255, 0), 2)
         
-        # Status text dengan background
+        # Status text dengan background - DIPERBAIKI untuk tampilan yang lebih baik
         status_text = f"Err:{error_val:3d} | Ctrl:{kontrol:5.1f}"
         cv2.rectangle(frame, (5, 5), (280, 35), (0, 0, 0), -1)
         cv2.putText(frame, status_text, (10, 25),
@@ -253,30 +283,38 @@ def visualize_tracking(frame, line_detected, cx=0, cy=0, error_val=0, kontrol=0)
 
 def main():
     """
-    Fungsi utama program
+    Fungsi utama program - DIPERBAIKI dengan stabilitas maksimal
     """
     # Setup komponen
-    print("Inisialisasi sistem...")
+    print("=== Inisialisasi Sistem Line Following Robot ===")
     fuzzy_ctrl = setup_fuzzy_logic()
     picam2 = setup_camera()
     ser = setup_serial()
+    error_filter = ErrorFilter(window_size=3)  # Filter untuk smooth error
     
+    # Variabel untuk kontrol yang stabil
     prev_error = 0
+    prev_kontrol = 0  # TAMBAHAN: simpan kontrol sebelumnya untuk smoothing
     line_lost_timeout = 0
-    MAX_LOST_TIME = 1.5  # Diperpendek untuk respons yang lebih cepat
+    MAX_LOST_TIME = 1.5
+    
+    # Statistik untuk monitoring
+    frame_count = 0
+    start_program = time.time()
     
     # Tunggu kamera stabil
     print("Menunggu kamera stabil...")
     time.sleep(2)
     
     try:
-        print("Memulai loop utama...")
+        print("=== Memulai Loop Utama ===")
         while True:
             start_time = time.time()
+            frame_count += 1
             
-            # Ambil dan proses gambar - dengan opsi threshold
+            # Ambil dan proses gambar
             frame = picam2.capture_array()
-            _, _, roi = process_image(frame, use_otsu=True)  # Gunakan Otsu threshold
+            _, binary, roi = process_image(frame, use_otsu=True)
             
             # Deteksi posisi garis
             line_detected, cx, cy = calculate_line_position(roi)
@@ -284,58 +322,124 @@ def main():
             if line_detected:
                 line_lost_timeout = 0
                 
-                # Hitung error dan delta error
-                error_val = cx - 160  # Error dari tengah frame
+                # Hitung error RAW dan filter untuk stabilitas
+                raw_error = cx - 160
+                error_val = error_filter.filter_error(raw_error)  # ERROR DIFILTER
                 delta_error = error_val - prev_error
                 
-                # Komputasi fuzzy dengan dead zone
-                kontrol = compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15)
+                # Debug info untuk error filtering
+                if frame_count % 20 == 0:  # Print setiap 20 frame
+                    print(f"[DEBUG] Raw Error: {raw_error:4d} | Filtered: {error_val:4d} | Delta: {delta_error:4d}")
                 
-                # Hitung PWM motor
-                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
+                # Komputasi fuzzy yang diperbaiki
+                kontrol = compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=25)
+                
+                # SMOOTHING kontrol - cegah perubahan mendadak yang menyebabkan oscillation
+                if abs(kontrol - prev_kontrol) > 20:  # Jika perubahan terlalu besar
+                    kontrol_smooth = prev_kontrol + np.sign(kontrol - prev_kontrol) * 10  # Batasi perubahan
+                    print(f"[SMOOTH] Kontrol di-smooth dari {prev_kontrol:.1f} ke {kontrol_smooth:.1f} (original: {kontrol:.1f})")
+                    kontrol = kontrol_smooth
+                
+                # Hitung PWM dengan algoritma baru
+                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol, base_pwm=55)
                 
                 # Kirim ke motor
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
                 
+                # Update history
                 prev_error = error_val
+                prev_kontrol = kontrol
                 
             else:
                 line_lost_timeout += 0.05
                 if line_lost_timeout >= MAX_LOST_TIME:
                     send_motor_commands(ser, 0, 0)
-                    print("[WARN] Garis hilang, motor dihentikan")
+                    print("[WARN] Garis hilang lama, motor dihentikan")
                 else:
                     # Tetap jalan dengan PWM terakhir untuk waktu singkat
-                    print("[WARN] Garis hilang, mencari...")
+                    print(f"[WARN] Garis hilang {line_lost_timeout:.1f}s, mencari...")
                     
                 kontrol = 0
                 error_val = 0
             
-            # Visualisasi
+            # Visualisasi dengan informasi lebih lengkap
             frame = visualize_tracking(frame, line_detected, cx, cy, error_val, kontrol)
-            cv2.imshow("Line Following Robot", frame)
+            
+            # Tambahkan info frame rate
+            if frame_count % 10 == 0:
+                fps = frame_count / (time.time() - start_program)
+                cv2.putText(frame, f"FPS: {fps:.1f}", (5, 220),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Tampilkan frame
+            cv2.imshow("Line Following Robot - Improved", frame)
             cv2.imshow("ROI Binary", roi)
             
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Kontrol exit
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                print("\n=== Program dihentikan oleh pengguna ===")
                 break
+            elif key == ord('r'):
+                print("[INFO] Reset error filter")
+                error_filter = ErrorFilter(window_size=3)
+                prev_error = 0
+                prev_kontrol = 0
             
-            # Kontrol frame rate - diperlambat untuk stabilitas
+            # Kontrol frame rate - 10 FPS untuk stabilitas maksimal
             elapsed = time.time() - start_time
-            if elapsed < 0.1:  # 10 FPS - diperlambat dari 20 FPS
-                time.sleep(0.1 - elapsed)
+            target_fps = 0.1  # 10 FPS
+            if elapsed < target_fps:
+                time.sleep(target_fps - elapsed)
+            
+            # Status report berkala
+            if frame_count % 100 == 0:
+                uptime = time.time() - start_program
+                avg_fps = frame_count / uptime
+                print(f"[STATUS] Frame: {frame_count} | Uptime: {uptime:.1f}s | Avg FPS: {avg_fps:.1f}")
             
     except KeyboardInterrupt:
-        print("\nDihentikan oleh pengguna")
+        print("\n=== Program dihentikan dengan Ctrl+C ===")
+    
+    except Exception as e:
+        print(f"\n[FATAL ERROR] {e}")
     
     finally:
-        # Cleanup
-        print("Membersihkan sumber daya...")
-        send_motor_commands(ser, 0, 0)
-        cv2.destroyAllWindows()
-        picam2.stop()
-        if ser:
-            ser.close()
-        print("Program selesai")
+        # Cleanup yang lebih aman
+        print("=== Membersihkan Sumber Daya ===")
+        try:
+            send_motor_commands(ser, 0, 0)
+            time.sleep(0.5)  # Pastikan command terkirim
+            print("[CLEANUP] Motor dihentikan")
+        except:
+            pass
+            
+        try:
+            cv2.destroyAllWindows()
+            print("[CLEANUP] Window ditutup")
+        except:
+            pass
+            
+        try:
+            picam2.stop()
+            print("[CLEANUP] Kamera dihentikan")
+        except:
+            pass
+            
+        try:
+            if ser:
+                ser.close()
+                print("[CLEANUP] Serial port ditutup")
+        except:
+            pass
+            
+        # Statistik akhir
+        total_time = time.time() - start_program
+        if frame_count > 0:
+            avg_fps = frame_count / total_time
+            print(f"[STATS] Total Frame: {frame_count} | Runtime: {total_time:.1f}s | Avg FPS: {avg_fps:.1f}")
+        
+        print("=== Program Selesai ===")
 
 if __name__ == "__main__":
     main()
