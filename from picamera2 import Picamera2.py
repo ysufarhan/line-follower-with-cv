@@ -16,22 +16,22 @@ def setup_fuzzy_logic():
     delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
     output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
     
-    # Definisikan membership functions - DIPERBAIKI dengan range yang lebih luas
+    # Definisikan membership functions - DIPERBAIKI dengan dead zone yang lebih besar
     error['NL'] = fuzz.trimf(error.universe, [-160, -160, -60])  # Negative Large
     error['NS'] = fuzz.trimf(error.universe, [-100, -40, 0])    # Negative Small
-    error['Z']  = fuzz.trimf(error.universe, [-30, 0, 30])      # Zero - diperluas
+    error['Z']  = fuzz.trimf(error.universe, [-25, 0, 25])      # Zero - diperluas untuk stabilitas
     error['PS'] = fuzz.trimf(error.universe, [0, 40, 100])     # Positive Small
     error['PL'] = fuzz.trimf(error.universe, [60, 160, 160])   # Positive Large
 
     delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -40])
     delta['NS'] = fuzz.trimf(delta.universe, [-60, -30, 0])
-    delta['Z']  = fuzz.trimf(delta.universe, [-20, 0, 20])     # diperluas
+    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])     # diperluas untuk stabilitas
     delta['PS'] = fuzz.trimf(delta.universe, [0, 30, 60])
     delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 100])
 
     output['L']  = fuzz.trimf(output.universe, [-100, -100, -40])  # Left
     output['LS'] = fuzz.trimf(output.universe, [-60, -30, 0])     # Left Small
-    output['Z']  = fuzz.trimf(output.universe, [-15, 0, 15])      # Zero - diperluas
+    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])      # Zero - diperkecil untuk dead zone
     output['RS'] = fuzz.trimf(output.universe, [0, 30, 60])      # Right Small
     output['R']  = fuzz.trimf(output.universe, [40, 100, 100])   # Right
     
@@ -142,11 +142,16 @@ def calculate_line_position(roi):
     else:
         return False, 0, 0
 
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
+def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15):
     """
-    Menghitung output kontrol berdasarkan fuzzy logic
+    Menghitung output kontrol berdasarkan fuzzy logic dengan dead zone
     """
     try:
+        # DEAD ZONE - jika error sangat kecil, langsung return 0
+        if abs(error_val) <= dead_zone and abs(delta_error) <= 10:
+            print(f"[FLC] DEAD ZONE - Error: {error_val:4d} | Delta: {delta_error:4d} | Output: 0.00 (LURUS)")
+            return 0.0
+        
         # Batasi input dalam range yang valid
         error_val = max(-160, min(160, error_val))
         delta_error = max(-100, min(100, delta_error))
@@ -156,6 +161,10 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
         fuzzy_ctrl.compute()
         kontrol = fuzzy_ctrl.output['output']
         
+        # Smooth output - hilangkan noise kecil
+        if abs(kontrol) < 5:
+            kontrol = 0.0
+        
         print(f"[FLC] Error: {error_val:4d} | Delta: {delta_error:4d} | Output: {kontrol:6.2f}")
         return kontrol
     except Exception as e:
@@ -164,7 +173,7 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
 
 def calculate_motor_pwm(kontrol, base_pwm=45):  # DITURUNKAN dari 65 ke 45
     """
-    Menghitung PWM untuk motor berdasarkan nilai kontrol - LOGIKA DIPERBAIKI
+    Menghitung PWM untuk motor berdasarkan nilai kontrol - LOGIKA DIPERBAIKI + DEAD ZONE
     
     Logika yang benar:
     - Error negatif (garis di kiri) -> robot harus belok kiri -> PWM kanan > PWM kiri
@@ -174,24 +183,32 @@ def calculate_motor_pwm(kontrol, base_pwm=45):  # DITURUNKAN dari 65 ke 45
     # Scaling factor untuk kontrol yang lebih halus
     kontrol_scaled = kontrol * 0.3  # DITURUNKAN dari 0.4 ke 0.3 untuk lebih smooth
     
-    # LOGIKA DIPERBAIKI: 
-    # Kontrol negatif (belok kiri) -> PWM kiri dikurangi, PWM kanan ditambah
-    # Kontrol positif (belok kanan) -> PWM kiri ditambah, PWM kanan dikurangi
-    pwm_kiri = base_pwm + kontrol_scaled   # DIBALIK: dulu dikurangi, sekarang ditambah
-    pwm_kanan = base_pwm - kontrol_scaled  # DIBALIK: dulu ditambah, sekarang dikurangi
+    # DEAD ZONE untuk PWM - pastikan PWM sama ketika kontrol mendekati 0
+    if abs(kontrol_scaled) < 2:  # Threshold untuk PWM yang sama persis
+        pwm_kiri = base_pwm
+        pwm_kanan = base_pwm
+        arah = "LURUS"
+        print(f"[PWM] DEAD ZONE - Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
+    else:
+        # LOGIKA DIPERBAIKI: 
+        # Kontrol negatif (belok kiri) -> PWM kiri dikurangi, PWM kanan ditambah
+        # Kontrol positif (belok kanan) -> PWM kiri ditambah, PWM kanan dikurangi
+        pwm_kiri = base_pwm + kontrol_scaled   # DIBALIK: dulu dikurangi, sekarang ditambah
+        pwm_kanan = base_pwm - kontrol_scaled  # DIBALIK: dulu ditambah, sekarang dikurangi
+        
+        # Tentukan arah berdasarkan kontrol
+        if kontrol_scaled < -2:
+            arah = "KIRI"
+        elif kontrol_scaled > 2:
+            arah = "KANAN"
+        else:
+            arah = "LURUS"
+        
+        print(f"[PWM] Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
     
     # Batasi PWM ke rentang yang lebih rendah untuk kecepatan lambat
     pwm_kiri = max(0, min(80, pwm_kiri))   # Max 80% bukan 100%
     pwm_kanan = max(0, min(80, pwm_kanan)) # Max 80% bukan 100%
-    
-    # Print output PWM dengan lebih detail dan penjelasan arah
-    arah = "LURUS"
-    if kontrol_scaled < -5:
-        arah = "KIRI"
-    elif kontrol_scaled > 5:
-        arah = "KANAN"
-    
-    print(f"[PWM] Kontrol: {kontrol:6.2f} | Arah: {arah:5s} | Kiri: {pwm_kiri:5.1f}% | Kanan: {pwm_kanan:5.1f}%")
     
     return int(pwm_kiri), int(pwm_kanan)
 
@@ -271,8 +288,8 @@ def main():
                 error_val = cx - 160  # Error dari tengah frame
                 delta_error = error_val - prev_error
                 
-                # Komputasi fuzzy
-                kontrol = compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error)
+                # Komputasi fuzzy dengan dead zone
+                kontrol = compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=15)
                 
                 # Hitung PWM motor
                 pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
