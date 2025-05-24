@@ -5,7 +5,6 @@ import time
 import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
-from datetime import datetime
 import os
 
 class ErrorFilter:
@@ -24,9 +23,7 @@ class Logger:
         self.start_time = time.time()
         
     def log(self, level, message):
-        timestamp = time.time() - self.start_time
-        current_time = datetime.now().strftime("%H:%M:%S")
-        print(f"[{current_time}] [{level:5s}] {message}")
+        print(f"[{level:5s}] {message}")
         
     def info(self, message):
         self.log("INFO", message)
