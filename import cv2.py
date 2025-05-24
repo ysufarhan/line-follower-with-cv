@@ -17,28 +17,14 @@ class ErrorFilter:
             self.error_history.pop(0)
         return int(sum(self.error_history) / len(self.error_history))
 
-def setup_fuzzy_logic_mix():
+def setup_fuzzy_logic():
     error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
     output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
 
-    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -60])
-    error['NS'] = fuzz.trimf(error.universe, [-100, -40, -5])
-    error['Z']  = fuzz.trimf(error.universe, [-20, 0, 20])
-    error['PS'] = fuzz.trimf(error.universe, [5, 40, 100])
-    error['PL'] = fuzz.trimf(error.universe, [60, 160, 160])
-
-    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -40])
-    delta['NS'] = fuzz.trimf(delta.universe, [-60, -20, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 60])
-    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 100])
-
-    output['L']  = fuzz.trimf(output.universe, [-100, -100, -40])
-    output['LS'] = fuzz.trimf(output.universe, [-60, -25, -5])
-    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])
-    output['RS'] = fuzz.trimf(output.universe, [5, 25, 60])
-    output['R']  = fuzz.trimf(output.universe, [40, 100, 100])
+    error.automf(names=['NL', 'NS', 'Z', 'PS', 'PL'])
+    delta.automf(names=['NL', 'NS', 'Z', 'PS', 'PL'])
+    output.automf(names=['L', 'LS', 'Z', 'RS', 'R'])
 
     rules = [
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
@@ -53,9 +39,9 @@ def setup_fuzzy_logic_mix():
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
+        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
@@ -85,59 +71,59 @@ def setup_camera():
 def setup_serial():
     try:
         ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
-        print("[UART] Serial opened")
+        print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
-        print(f"[UART ERROR] {e}")
+        print(f"[UART ERROR] Gagal membuka serial port: {e}")
         return None
 
 def process_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    return binary[160:240, :]
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    roi = binary[160:240, :]
+    return gray, binary, roi
 
 def calculate_line_position(roi):
     kernel = np.ones((3,3), np.uint8)
-    cleaned = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
-    M = cv2.moments(cleaned)
+    roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
+    roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
+    M = cv2.moments(roi_clean)
     if M['m00'] > 100:
         cx = int(M['m10'] / M['m00'])
-        return True, cx
-    return False, 0
+        cy = int(M['m01'] / M['m00']) + 160
+        return True, cx, cy
+    return False, 0, 0
 
-def compute_fuzzy_output(fuzzy_ctrl, error, delta):
+def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
     try:
-        error = max(-160, min(160, error))
-        delta = max(-100, min(100, delta))
-        fuzzy_ctrl.input['error'] = error
-        fuzzy_ctrl.input['delta'] = delta
+        fuzzy_ctrl.input['error'] = np.clip(error_val, -160, 160)
+        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -100, 100)
         fuzzy_ctrl.compute()
-        output = fuzzy_ctrl.output['output']
-        return 0 if abs(error) < 5 else np.clip(output, -100, 100)  # DEAD ZONE
+        return np.clip(fuzzy_ctrl.output['output'], -100, 100)
     except Exception as e:
         print(f"[FLC ERROR] {e}")
-        return 0
+        return 0.0
 
-def calculate_motor_pwm(kontrol, base_pwm=55, scaling=0.25):
-    k_scaled = kontrol * scaling
-    pwm_left = max(25, min(80, base_pwm + k_scaled))
-    pwm_right = max(25, min(80, base_pwm - k_scaled))
-    return int(pwm_left), int(pwm_right)
+def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.2):
+    kontrol_scaled = kontrol * scaling_factor
+    pwm_kiri = base_pwm + kontrol_scaled
+    pwm_kanan = base_pwm - kontrol_scaled
+    pwm_kiri = max(25, min(80, pwm_kiri))
+    pwm_kanan = max(25, min(80, pwm_kanan))
+    return int(pwm_kiri), int(pwm_kanan)
 
-def send_motor_commands(ser, left, right):
+def send_motor_commands(ser, pwm_kiri, pwm_kanan):
     if ser:
         try:
-            cmd = f"{left},{right}\n"
+            cmd = f"{pwm_kiri},{pwm_kanan}\n"
             ser.write(cmd.encode())
             ser.flush()
         except Exception as e:
             print(f"[SERIAL ERROR] {e}")
 
 def main():
-    print("[SYSTEM] Starting Mixed Fuzzy Line Follower")
-
-    fuzzy_ctrl = setup_fuzzy_logic_mix()
+    fuzzy_ctrl = setup_fuzzy_logic()
     picam2 = setup_camera()
     ser = setup_serial()
     error_filter = ErrorFilter(window_size=3)
@@ -147,37 +133,48 @@ def main():
 
     try:
         while True:
-            frame_count += 1
             frame = picam2.capture_array()
-            roi = process_image(frame)
+            gray, binary, roi = process_image(frame)
 
-            detected, cx = calculate_line_position(roi)
-            if detected:
+            line_detected, cx, cy = calculate_line_position(roi)
+            if line_detected:
                 error = cx - 160
                 error = error_filter.filter_error(error)
                 delta_error = error - prev_error
                 prev_error = error
 
-                kontrol = compute_fuzzy_output(fuzzy_ctrl, error, delta_error)
-                pwm_left, pwm_right = calculate_motor_pwm(kontrol)
-
-                send_motor_commands(ser, pwm_left, pwm_right)
+                kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
+                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
+                send_motor_commands(ser, pwm_kiri, pwm_kanan)
 
                 if frame_count % 20 == 0:
-                    print(f"[DEBUG] Err: {error}, ΔErr: {delta_error}, FLC: {kontrol:.1f}, PWM: {pwm_left},{pwm_right}")
+                    print(f"[DEBUG] Error: {error}, Delta: {delta_error}, FLC: {kontrol:.2f}, PWM: {pwm_kiri}, {pwm_kanan}")
             else:
                 send_motor_commands(ser, 0, 0)
                 if frame_count % 20 == 0:
-                    print("[DEBUG] Line not detected")
+                    print("[DEBUG] Garis tidak terdeteksi")
 
+            # Tampilkan tampilan real-time untuk analisis
+            frame_with_line = frame.copy()
+            cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
+            cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1) if line_detected else None
+
+            cv2.imshow("Camera View", frame_with_line)
+            cv2.imshow("Threshold ROI", roi)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+            frame_count += 1
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("\n[SYSTEM] Stopped by user")
+        print("\n[INFO] Dihentikan oleh pengguna")
     finally:
         send_motor_commands(ser, 0, 0)
-        if ser: ser.close()
+        if ser:
+            ser.close()
         picam2.stop()
-        print("[SYSTEM] Shutdown complete")
+        cv2.destroyAllWindows()
+        print("[INFO] Program selesai")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
