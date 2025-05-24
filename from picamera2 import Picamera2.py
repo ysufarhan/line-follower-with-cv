@@ -40,40 +40,40 @@ class Logger:
     def error(self, message):
         self.log("ERROR", message)
 
-def setup_fuzzy_logic_aggressive():
-    """Setup FLC dengan rules yang lebih agresif untuk mengatasi robot terdiam"""
+def setup_fuzzy_logic_smooth():
+    """Setup FLC dengan response yang lebih halus untuk kecepatan rendah"""
     logger.info("Setting up Fuzzy Logic Controller...")
     
     error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
     output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
 
-    # Membership functions dengan response lebih agresif
-    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -50])
-    error['NS'] = fuzz.trimf(error.universe, [-80, -30, -5])
-    error['Z']  = fuzz.trimf(error.universe, [-20, 0, 20])
-    error['PS'] = fuzz.trimf(error.universe, [5, 30, 80])
-    error['PL'] = fuzz.trimf(error.universe, [50, 160, 160])
+    # Membership functions dengan response yang lebih halus
+    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -60])
+    error['NS'] = fuzz.trimf(error.universe, [-90, -40, -10])
+    error['Z']  = fuzz.trimf(error.universe, [-30, 0, 30])
+    error['PS'] = fuzz.trimf(error.universe, [10, 40, 90])
+    error['PL'] = fuzz.trimf(error.universe, [60, 160, 160])
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -30])
-    delta['NS'] = fuzz.trimf(delta.universe, [-50, -15, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-10, 0, 10])
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 15, 50])
-    delta['PL'] = fuzz.trimf(delta.universe, [30, 100, 100])
+    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-60, -20, -5])
+    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])
+    delta['PS'] = fuzz.trimf(delta.universe, [5, 20, 60])
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 100])
 
-    # Output dengan range lebih lebar untuk respons agresif
-    output['L']  = fuzz.trimf(output.universe, [-100, -100, -30])
-    output['LS'] = fuzz.trimf(output.universe, [-50, -20, -5])
-    output['Z']  = fuzz.trimf(output.universe, [-8, 0, 8])
-    output['RS'] = fuzz.trimf(output.universe, [5, 20, 50])
-    output['R']  = fuzz.trimf(output.universe, [30, 100, 100])
+    # Output dengan range yang lebih kecil untuk gerakan halus
+    output['L']  = fuzz.trimf(output.universe, [-100, -100, -40])
+    output['LS'] = fuzz.trimf(output.universe, [-60, -25, -8])
+    output['Z']  = fuzz.trimf(output.universe, [-12, 0, 12])
+    output['RS'] = fuzz.trimf(output.universe, [8, 25, 60])
+    output['R']  = fuzz.trimf(output.universe, [40, 100, 100])
 
-    # Rules yang lebih agresif
+    # Rules yang lebih konservatif
     rules = [
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['L']),
+        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
         ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),
         ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
 
         ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
@@ -95,9 +95,9 @@ def setup_fuzzy_logic_aggressive():
         ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
 
         ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
         ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['R']),
+        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
         ctrl.Rule(error['PL'] & delta['PL'], output['R']),
     ]
 
@@ -225,8 +225,8 @@ def calculate_line_position_robust(processed_img):
     
     return False, 0, 0, 0.0, 'none'
 
-def compute_fuzzy_control_enhanced(fuzzy_ctrl, error_val, delta_error):
-    """Enhanced fuzzy control dengan error handling yang lebih baik"""
+def compute_fuzzy_control_smooth(fuzzy_ctrl, error_val, delta_error):
+    """Smooth fuzzy control untuk kecepatan rendah"""
     try:
         # Clamp inputs
         error_val = max(-160, min(160, error_val))
@@ -238,8 +238,8 @@ def compute_fuzzy_control_enhanced(fuzzy_ctrl, error_val, delta_error):
         
         kontrol = fuzzy_ctrl.output['output']
         
-        # Enhanced output processing
-        if abs(kontrol) < 3:  # Very small output
+        # Smooth output processing untuk gerakan halus
+        if abs(kontrol) < 5:  # Dead zone lebih besar
             kontrol = 0.0
         
         return np.clip(kontrol, -100, 100)
@@ -248,29 +248,23 @@ def compute_fuzzy_control_enhanced(fuzzy_ctrl, error_val, delta_error):
         logger.error(f"FLC computation error: {e}")
         return 0.0
 
-def calculate_motor_pwm_enhanced(kontrol, base_pwm=60, scaling_factor=0.3, min_turn_pwm=35):
+def calculate_motor_pwm_slow(kontrol, base_pwm=35, scaling_factor=0.15):
     """
-    Enhanced PWM calculation untuk mengatasi robot terdiam saat berbelok
+    PWM calculation untuk kecepatan rendah dan gerakan halus
     """
-    # Aggressive scaling untuk mengatasi robot terdiam
+    # Scaling yang lebih kecil untuk gerakan halus
     kontrol_scaled = kontrol * scaling_factor
     
-    # Calculate base PWM
+    # Calculate PWM dengan base yang lebih rendah
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
     
-    # Enhanced: Minimum PWM untuk turning
-    if abs(kontrol) > 15:  # Significant turning required
-        if kontrol > 0:  # Turn right
-            pwm_kiri = max(pwm_kiri, base_pwm + 10)  # Ensure left motor has enough power
-            pwm_kanan = max(pwm_kanan, min_turn_pwm)  # Minimum power for right motor
-        else:  # Turn left
-            pwm_kanan = max(pwm_kanan, base_pwm + 10)  # Ensure right motor has enough power
-            pwm_kiri = max(pwm_kiri, min_turn_pwm)    # Minimum power for left motor
+    # Minimum PWM untuk memastikan motor bergerak
+    min_pwm = 15
     
-    # Clamp to safe range
-    pwm_kiri = max(20, min(85, pwm_kiri))
-    pwm_kanan = max(20, min(85, pwm_kanan))
+    # Clamp to safe range dengan maksimum yang lebih rendah
+    pwm_kiri = max(min_pwm, min(50, pwm_kiri))
+    pwm_kanan = max(min_pwm, min(50, pwm_kanan))
     
     return int(pwm_kiri), int(pwm_kanan)
 
@@ -283,16 +277,36 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
         except Exception as e:
             logger.error(f"Serial communication error: {e}")
 
+def visualize_tracking(frame, line_detected, cx=0, cy=0, processed_img=None):
+    """
+    Membuat visualisasi tracking pada frame dengan ROI overlay
+    """
+    # Draw center line
+    cv2.line(frame, (160, 0), (160, 240), (255, 0, 0), 2)
+    
+    # Draw ROI boundaries
+    cv2.rectangle(frame, (0, 120), (320, 240), (0, 255, 255), 1)  # Full ROI
+    cv2.rectangle(frame, (0, 140), (320, 200), (255, 255, 0), 1)  # Middle ROI
+    cv2.rectangle(frame, (0, 180), (320, 240), (0, 255, 0), 2)   # Bottom ROI
+    
+    if line_detected:
+        # Draw detected line center
+        cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+        # Draw line from center to detected point
+        cv2.line(frame, (160, 200), (cx, cy), (0, 0, 255), 2)
+    
+    return frame
+
 def main():
     global logger
     logger = Logger()
     
     logger.info("="*60)
-    logger.info("LINE FOLLOWING ROBOT - Enhanced Version")
+    logger.info("LINE FOLLOWING ROBOT - Reduced Speed Version")
     logger.info("="*60)
     
     # Setup komponen
-    fuzzy_ctrl = setup_fuzzy_logic_aggressive()
+    fuzzy_ctrl = setup_fuzzy_logic_smooth()
     picam2 = setup_camera()
     ser = setup_serial()
     
@@ -308,16 +322,14 @@ def main():
     last_line_time = time.time()
     no_line_count = 0
     
-    # Parameter yang dapat disesuaikan
-    BASE_PWM = 60           # Kecepatan dasar (dinaikkan dari 55)
-    SCALING_FACTOR = 0.3    # Faktor scaling (dinaikkan dari 0.2)
-    MIN_TURN_PWM = 35       # PWM minimum saat berbelok
-    LOG_INTERVAL = 10       # Log setiap N frame
+    # Parameter untuk kecepatan rendah
+    BASE_PWM = 35           # Kecepatan dasar dikurangi drastis
+    SCALING_FACTOR = 0.15   # Faktor scaling dikurangi
+    LOG_INTERVAL = 20       # Log lebih jarang
     
-    logger.info(f"Configuration:")
+    logger.info(f"Configuration (SLOW MODE):")
     logger.info(f"  Base PWM: {BASE_PWM}")
     logger.info(f"  Scaling Factor: {SCALING_FACTOR}")
-    logger.info(f"  Minimum Turn PWM: {MIN_TURN_PWM}")
     logger.info(f"  Log Interval: {LOG_INTERVAL} frames")
     
     try:
@@ -344,79 +356,71 @@ def main():
                 prev_error = error
                 
                 # Compute FLC output
-                kontrol = compute_fuzzy_control_enhanced(fuzzy_ctrl, error, delta_error)
+                kontrol = compute_fuzzy_control_smooth(fuzzy_ctrl, error, delta_error)
                 
-                # Hitung PWM dengan enhanced method
-                pwm_kiri, pwm_kanan = calculate_motor_pwm_enhanced(
-                    kontrol, BASE_PWM, SCALING_FACTOR, MIN_TURN_PWM
+                # Hitung PWM dengan reduced speed method
+                pwm_kiri, pwm_kanan = calculate_motor_pwm_slow(
+                    kontrol, BASE_PWM, SCALING_FACTOR
                 )
                 
                 # Kirim command ke motor
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
                 
-                # Detailed logging dengan PWM yang jelas
+                # Simplified logging - hanya error, delta error, Motor L/R, Fuzzy Out
                 if frame_count % LOG_INTERVAL == 0:
-                    turn_direction = "STRAIGHT"
-                    if abs(kontrol) > 15:
-                        turn_direction = "RIGHT" if kontrol > 0 else "LEFT"
-                    
-                    # Buat indikator visual untuk PWM
-                    pwm_diff = pwm_kiri - pwm_kanan
-                    pwm_indicator = "→" if pwm_diff > 5 else "←" if pwm_diff < -5 else "↑"
-                    
-                    logger.debug(f"Frame {frame_count:4d} | "
-                               f"Pos: ({cx:3d},{cy:3d}) | "
-                               f"Err: {error:4d} | "
-                               f"ΔErr: {delta_error:4d} | "
-                               f"FLC: {kontrol:6.1f} | "
-                               f"PWM_L: {pwm_kiri:2d} | PWM_R: {pwm_kanan:2d} {pwm_indicator} | "
-                               f"Turn: {turn_direction:8s} | "
-                               f"Conf: {confidence:.2f} | "
-                               f"Src: {source} | "
-                               f"Bright: {processed_img['brightness']:.0f}")
-                    
-                    # Tambahan: Log khusus PWM untuk debugging motor
-                    logger.info(f"MOTOR_PWM | LEFT: {pwm_kiri:2d} | RIGHT: {pwm_kanan:2d} | "
-                              f"DIFF: {pwm_diff:+3d} | ACTION: {turn_direction}")
+                    logger.info(f"Error: {error:4d} | "
+                              f"Delta: {delta_error:4d} | "
+                              f"Motor L: {pwm_kiri:2d} | "
+                              f"Motor R: {pwm_kanan:2d} | "
+                              f"Fuzzy Out: {kontrol:6.1f}")
                 
             else:
                 no_line_count += 1
                 time_since_line = current_time - last_line_time
                 
-                # Strategy saat garis hilang
-                if time_since_line < 0.5:  # Recently lost line - keep last direction
-                    if abs(prev_error) > 40:  # Was turning significantly
-                        # Continue turning in last direction
-                        emergency_kontrol = np.sign(prev_error) * 60
-                        pwm_kiri, pwm_kanan = calculate_motor_pwm_enhanced(
-                            emergency_kontrol, BASE_PWM * 0.8, SCALING_FACTOR
+                # Strategy saat garis hilang - lebih konservatif
+                if time_since_line < 1.0:  # Keep last direction briefly
+                    if abs(prev_error) > 30:
+                        # Continue turning in last direction dengan kecepatan rendah
+                        emergency_kontrol = np.sign(prev_error) * 30
+                        pwm_kiri, pwm_kanan = calculate_motor_pwm_slow(
+                            emergency_kontrol, BASE_PWM * 0.7, SCALING_FACTOR
                         )
                         send_motor_commands(ser, pwm_kiri, pwm_kanan)
                         
                         if frame_count % LOG_INTERVAL == 0:
-                            logger.warn(f"Line lost - continuing turn | "
-                                      f"PWM_L: {pwm_kiri:2d} | PWM_R: {pwm_kanan:2d} | "
-                                      f"Last_Error: {prev_error:+3d}")
+                            logger.warn(f"Line lost - continue turn | "
+                                      f"Motor L: {pwm_kiri:2d} | Motor R: {pwm_kanan:2d}")
                     else:
                         # Go straight slowly
                         straight_pwm = BASE_PWM//2
                         send_motor_commands(ser, straight_pwm, straight_pwm)
                         if frame_count % LOG_INTERVAL == 0:
-                            logger.warn(f"Line lost - going straight | "
-                                      f"PWM_L: {straight_pwm:2d} | PWM_R: {straight_pwm:2d}")
+                            logger.warn(f"Line lost - straight | "
+                                      f"Motor L: {straight_pwm:2d} | Motor R: {straight_pwm:2d}")
                 else:
-                    # Long time without line - stop
+                    # Stop after longer time
                     send_motor_commands(ser, 0, 0)
                     if frame_count % (LOG_INTERVAL * 2) == 0:
-                        logger.warn(f"Line lost for {time_since_line:.1f}s - STOPPING | "
-                                  f"PWM_L: 0 | PWM_R: 0")
+                        logger.warn(f"Line lost {time_since_line:.1f}s - STOP")
+            
+            # Visualisasi dengan ROI display
+            frame_vis = visualize_tracking(frame, line_detected, cx, cy, processed_img)
+            cv2.imshow("Line Following - Original", frame_vis)
+            cv2.imshow("ROI Thresholding - Combined", processed_img['combined'])
+            cv2.imshow("ROI Bottom", processed_img['roi_bottom'])
+            cv2.imshow("ROI Middle", processed_img['roi_middle'])
             
             # System health monitoring
-            if frame_count % 100 == 0:
-                logger.info(f"System Status - Frame: {frame_count}, "
-                          f"Line Detection Rate: {((100-no_line_count)/100)*100:.0f}%")
+            if frame_count % 200 == 0:
+                logger.info(f"System Status - Frame: {frame_count}")
             
-            time.sleep(0.05)  # 20 FPS
+            # Exit condition
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                logger.info("Program terminated by user (q key)")
+                break
+            
+            time.sleep(0.1)  # 10 FPS untuk kecepatan rendah
             
     except KeyboardInterrupt:
         logger.info("Program interrupted by user")
@@ -426,12 +430,13 @@ def main():
         # Cleanup
         logger.info("Performing cleanup...")
         send_motor_commands(ser, 0, 0)  # Stop motors
-        logger.info("MOTOR_PWM | LEFT: 0 | RIGHT: 0 | DIFF: 0 | ACTION: STOPPED")
+        logger.info("Motors stopped")
         if ser:
             ser.close()
         if picam2:
             picam2.stop()
-        logger.info("Cleanup completed - Robot stopped")
+        cv2.destroyAllWindows()
+        logger.info("Cleanup completed")
 
 if __name__ == '__main__':
     main()
