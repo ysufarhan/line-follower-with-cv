@@ -18,29 +18,33 @@ class ErrorFilter:
             self.error_history.pop(0)
         return int(sum(self.error_history) / len(self.error_history))
 
-def setup_fuzzy_logic():
+def setup_fuzzy_logic_smooth():
+    """Setup FLC dengan membership function yang lebih smooth untuk output kontinyu"""
     error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
     output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
 
-    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -80])
-    error['NS'] = fuzz.trimf(error.universe, [-120, -50, -10])
-    error['Z']  = fuzz.trimf(error.universe, [-40, 0, 40])
-    error['PS'] = fuzz.trimf(error.universe, [10, 50, 120])
-    error['PL'] = fuzz.trimf(error.universe, [80, 160, 160])
+    # Membership functions dengan overlap lebih besar untuk transisi halus
+    error['NL'] = fuzz.trimf(error.universe, [-160, -160, -60])
+    error['NS'] = fuzz.trimf(error.universe, [-100, -40, -5])
+    error['Z']  = fuzz.trimf(error.universe, [-30, 0, 30])
+    error['PS'] = fuzz.trimf(error.universe, [5, 40, 100])
+    error['PL'] = fuzz.trimf(error.universe, [60, 160, 160])
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -50])
-    delta['NS'] = fuzz.trimf(delta.universe, [-70, -25, -5])
-    delta['Z']  = fuzz.trimf(delta.universe, [-20, 0, 20])
-    delta['PS'] = fuzz.trimf(delta.universe, [5, 25, 70])
-    delta['PL'] = fuzz.trimf(delta.universe, [50, 100, 100])
+    delta['NL'] = fuzz.trimf(delta.universe, [-100, -100, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-60, -20, -3])
+    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])
+    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 60])
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 100])
 
-    output['L']  = fuzz.trimf(output.universe, [-100, -100, -50])
-    output['LS'] = fuzz.trimf(output.universe, [-70, -35, -10])
-    output['Z']  = fuzz.trimf(output.universe, [-15, 0, 15])
-    output['RS'] = fuzz.trimf(output.universe, [10, 35, 70])
-    output['R']  = fuzz.trimf(output.universe, [50, 100, 100])
+    # Output dengan range yang lebih halus
+    output['L']  = fuzz.trimf(output.universe, [-100, -100, -40])
+    output['LS'] = fuzz.trimf(output.universe, [-60, -25, -5])
+    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])
+    output['RS'] = fuzz.trimf(output.universe, [5, 25, 60])
+    output['R']  = fuzz.trimf(output.universe, [40, 100, 100])
 
+    # Rules yang lebih balanced
     rules = [
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
         ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
@@ -54,11 +58,11 @@ def setup_fuzzy_logic():
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        ctrl.Rule(error['Z'] & delta['NL'], output['Z']),
+        ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PL'], output['Z']),
+        ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
@@ -113,36 +117,62 @@ def calculate_line_position(roi):
         return True, cx, cy
     return False, 0, 0
 
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error, dead_zone=25):
+def compute_fuzzy_control_smooth(fuzzy_ctrl, error_val, delta_error):
+    """Compute fuzzy control tanpa dead zone untuk output kontinyu"""
     try:
-        if abs(error_val) <= dead_zone and abs(delta_error) <= 15:
-            return 0.0
+        # Clamp input values
         error_val = max(-160, min(160, error_val))
         delta_error = max(-100, min(100, delta_error))
+        
         fuzzy_ctrl.input['error'] = error_val
         fuzzy_ctrl.input['delta'] = delta_error
         fuzzy_ctrl.compute()
+        
         kontrol = fuzzy_ctrl.output['output']
-        if abs(kontrol) < 8:
-            kontrol = 0.0
-        return np.clip(kontrol, -80, 80)
+        
+        # Clip output untuk keamanan
+        return np.clip(kontrol, -100, 100)
+        
     except Exception as e:
         print(f"[FLC ERROR] {e}")
-        return 0
+        return 0.0
 
-def calculate_motor_pwm(kontrol, base_pwm=55):
-    if abs(kontrol) <= 10:
-        return base_pwm, base_pwm
-    elif abs(kontrol) <= 30:
-        kontrol_scaled = kontrol * 0.08
-    elif abs(kontrol) <= 60:
-        kontrol_scaled = kontrol * 0.12
-    else:
-        kontrol_scaled = kontrol * 0.15
+def calculate_motor_pwm_direct(kontrol, base_pwm=55, scaling_factor=0.2):
+    """
+    Direct PWM calculation dari FLC output tanpa if-else
+    
+    Args:
+        kontrol: Output dari FLC (-100 to 100)
+        base_pwm: Base speed untuk kedua motor
+        scaling_factor: Faktor pengali untuk kontrol (0.1 - 0.3)
+    """
+    # Direct scaling tanpa kondisi if-else
+    kontrol_scaled = kontrol * scaling_factor
+    
+    # Hitung PWM untuk masing-masing motor
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
-    pwm_kiri = max(30, min(75, pwm_kiri))
-    pwm_kanan = max(30, min(75, pwm_kanan))
+    
+    # Clamp PWM values ke range yang aman
+    pwm_kiri = max(25, min(80, pwm_kiri))
+    pwm_kanan = max(25, min(80, pwm_kanan))
+    
+    return int(pwm_kiri), int(pwm_kanan)
+
+def calculate_motor_pwm_sigmoid(kontrol, base_pwm=55, max_scale=0.25, steepness=0.05):
+    """
+    Alternatif: Sigmoid scaling untuk respons lebih halus
+    """
+    # Sigmoid function untuk scaling yang halus
+    sigmoid_val = max_scale * (2 / (1 + np.exp(-steepness * abs(kontrol))) - 1)
+    kontrol_scaled = np.sign(kontrol) * sigmoid_val * abs(kontrol)
+    
+    pwm_kiri = base_pwm + kontrol_scaled
+    pwm_kanan = base_pwm - kontrol_scaled
+    
+    pwm_kiri = max(25, min(80, pwm_kiri))
+    pwm_kanan = max(25, min(80, pwm_kanan))
+    
     return int(pwm_kiri), int(pwm_kanan)
 
 def send_motor_commands(ser, pwm_kiri, pwm_kanan):
@@ -155,27 +185,81 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
             print(f"[SERIAL ERROR] {e}")
 
 def main():
-    fuzzy_ctrl = setup_fuzzy_logic()
+    print("[SYSTEM] Starting Line Following Robot - Smooth FLC Mode")
+    
+    # Setup komponen
+    fuzzy_ctrl = setup_fuzzy_logic_smooth()
     picam2 = setup_camera()
     ser = setup_serial()
-    error_filter = ErrorFilter()
-    prev_error = 0
+    error_filter = ErrorFilter(window_size=3)
     
-    while True:
-        frame = picam2.capture_array()
-        _, _, roi = process_image(frame)
-        line_detected, cx, cy = calculate_line_position(roi)
-        if line_detected:
-            error = cx - 160
-            error = error_filter.filter_error(error)
-            delta_error = error - prev_error
-            prev_error = error
-            kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
-            pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
-            send_motor_commands(ser, pwm_kiri, pwm_kanan)
-        else:
-            send_motor_commands(ser, 0, 0)
-        time.sleep(0.05)
+    # Variabel kontrol
+    prev_error = 0
+    frame_count = 0
+    
+    # Parameter yang bisa disesuaikan
+    BASE_PWM = 55           # Kecepatan dasar (30-70)
+    SCALING_FACTOR = 0.2    # Faktor scaling kontrol (0.1-0.3)
+    USE_SIGMOID = False     # True untuk menggunakan sigmoid scaling
+    
+    print(f"[CONFIG] Base PWM: {BASE_PWM}, Scaling: {SCALING_FACTOR}")
+    print(f"[CONFIG] Scaling Method: {'Sigmoid' if USE_SIGMOID else 'Linear Direct'}")
+    
+    try:
+        while True:
+            frame_count += 1
+            
+            # Capture dan process image
+            frame = picam2.capture_array()
+            _, _, roi = process_image(frame)
+            
+            # Deteksi posisi garis
+            line_detected, cx, cy = calculate_line_position(roi)
+            
+            if line_detected:
+                # Hitung error dan delta error
+                error = cx - 160  # Setpoint di tengah (160)
+                error = error_filter.filter_error(error)
+                delta_error = error - prev_error
+                prev_error = error
+                
+                # Compute FLC output
+                kontrol = compute_fuzzy_control_smooth(fuzzy_ctrl, error, delta_error)
+                
+                # Hitung PWM langsung dari FLC output
+                if USE_SIGMOID:
+                    pwm_kiri, pwm_kanan = calculate_motor_pwm_sigmoid(kontrol, BASE_PWM)
+                else:
+                    pwm_kiri, pwm_kanan = calculate_motor_pwm_direct(kontrol, BASE_PWM, SCALING_FACTOR)
+                
+                # Kirim command ke motor
+                send_motor_commands(ser, pwm_kiri, pwm_kanan)
+                
+                # Debug info setiap 20 frame
+                if frame_count % 20 == 0:
+                    print(f"[DEBUG] Error: {error:3d}, Delta: {delta_error:3d}, "
+                          f"FLC: {kontrol:5.1f}, PWM: L={pwm_kiri}, R={pwm_kanan}")
+                
+            else:
+                # Garis tidak terdeteksi - stop atau cari garis
+                send_motor_commands(ser, 0, 0)
+                if frame_count % 20 == 0:
+                    print("[DEBUG] Line not detected - stopping")
+            
+            # Delay untuk stabilitas
+            time.sleep(0.05)  # 20 FPS
+            
+    except KeyboardInterrupt:
+        print("\n[SYSTEM] Program dihentikan oleh user")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+    finally:
+        # Cleanup
+        send_motor_commands(ser, 0, 0)  # Stop motors
+        if ser:
+            ser.close()
+        picam2.stop()
+        print("[SYSTEM] Cleanup completed")
 
 if __name__ == '__main__':
     main()
