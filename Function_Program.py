@@ -120,4 +120,155 @@ def calculate_line_position(roi):
         return True, cx, cy
     return False, 0, 0
 
-def co
+def compute_fuzzy_control_smooth(fuzzy_ctrl, error_val, delta_error):
+    """Compute fuzzy control"""
+    try:
+        error_val = max(-160, min(160, error_val))
+        delta_error = max(-100, min(100, delta_error))
+        
+        fuzzy_ctrl.input['error'] = error_val
+        fuzzy_ctrl.input['delta'] = delta_error
+        fuzzy_ctrl.compute()
+        
+        kontrol = fuzzy_ctrl.output['output']
+        return np.clip(kontrol, -100, 100)
+        
+    except Exception as e:
+        print(f"[FLC ERROR] {e}")
+        return 0.0
+
+def calculate_motor_pwm_direct(kontrol, base_pwm=55, scaling_factor=0.2):
+    """Direct PWM calculation dari FLC output - LOGIKA DIPERBAIKI"""
+    # PERBAIKAN LOGIKA MOTOR:
+    # Kontrol negatif = garis di kiri = belok kiri = motor kanan lebih cepat
+    # Kontrol positif = garis di kanan = belok kanan = motor kiri lebih cepat
+    kontrol_scaled = kontrol * scaling_factor
+    
+    pwm_kiri = base_pwm - kontrol_scaled   # Motor kiri: kurangi saat belok kanan
+    pwm_kanan = base_pwm + kontrol_scaled  # Motor kanan: tambah saat belok kiri
+    
+    pwm_kiri = max(25, min(80, pwm_kiri))
+    pwm_kanan = max(25, min(80, pwm_kanan))
+    
+    return int(pwm_kiri), int(pwm_kanan)
+
+def send_motor_commands(ser, pwm_kiri, pwm_kanan):
+    if ser:
+        try:
+            cmd = f"{pwm_kiri},{pwm_kanan}\n"
+            ser.write(cmd.encode())
+            ser.flush()
+        except Exception as e:
+            print(f"[SERIAL ERROR] {e}")
+
+def draw_simple_overlay(frame, error, kontrol, cx):
+    """Draw simple overlay seperti di foto"""
+    # Text overlay sederhana
+    text = f"Err:{error:3d} | Ctrl: {kontrol:5.1f}"
+    cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    # Draw center line (biru)
+    center_x = frame.shape[1] // 2
+    cv2.line(frame, (center_x, 0), (center_x, frame.shape[0]), (255, 0, 0), 2)
+    
+    # Draw ROI area (kuning)
+    cv2.rectangle(frame, (0, 160), (frame.shape[1], 240), (0, 255, 255), 2)
+    
+    # Draw detected position (merah)
+    if cx > 0:
+        cv2.circle(frame, (cx, 200), 6, (0, 0, 255), -1)
+    
+    return frame
+
+def main():
+    print("[SYSTEM] Starting Line Following Robot - Simple Display")
+    
+    # Setup komponen
+    fuzzy_ctrl = setup_fuzzy_logic_smooth()
+    picam2 = setup_camera()
+    ser = setup_serial()
+    error_filter = ErrorFilter(window_size=3)
+    
+    # Variabel kontrol
+    prev_error = 0
+    frame_count = 0
+    
+    # Setup OpenCV windows
+    cv2.namedWindow('Line Following Robot - Improved', cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow('ROI Binary', cv2.WINDOW_AUTOSIZE)
+    
+    print("[DISPLAY] OpenCV windows ready - Press 'q' to quit")
+    
+    try:
+        while True:
+            frame_count += 1
+            
+            # Capture dan process image
+            frame = picam2.capture_array()
+            gray, binary, roi = process_image(frame)
+            
+            # Deteksi posisi garis
+            line_detected, cx, cy = calculate_line_position(roi)
+            
+            if line_detected:
+                # Hitung error dan delta error
+                error = cx - 160  # Setpoint di tengah (160)
+                error = error_filter.filter_error(error)
+                delta_error = error - prev_error
+                prev_error = error
+                
+                # Compute FLC output
+                kontrol = compute_fuzzy_control_smooth(fuzzy_ctrl, error, delta_error)
+                
+                # Hitung PWM dengan logika yang sudah diperbaiki
+                pwm_kiri, pwm_kanan = calculate_motor_pwm_direct(kontrol, base_pwm=55, scaling_factor=0.2)
+                
+                # Kirim command ke motor
+                send_motor_commands(ser, pwm_kiri, pwm_kanan)
+                
+                # Debug info
+                if frame_count % 20 == 0:
+                    print(f"[DEBUG] Error: {error:3d}, Delta: {delta_error:3d}, "
+                          f"FLC: {kontrol:5.1f}, PWM: L={pwm_kiri}, R={pwm_kanan}")
+                
+            else:
+                # Garis tidak terdeteksi
+                send_motor_commands(ser, 0, 0)
+                error = 0
+                kontrol = 0.0
+                cx = 0
+                
+                if frame_count % 20 == 0:
+                    print("[DEBUG] Line not detected - stopping")
+            
+            # Display frames
+            display_frame = draw_simple_overlay(frame.copy(), error, kontrol, cx)
+            cv2.imshow('Line Following Robot - Improved', display_frame)
+            
+            # Show binary ROI
+            roi_display = cv2.resize(roi, (320, 160))  # Resize untuk display
+            cv2.imshow('ROI Binary', roi_display)
+            
+            # Check for quit
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                print("[SYSTEM] Quit key pressed")
+                break
+            
+            time.sleep(0.05)  # 20 FPS
+            
+    except KeyboardInterrupt:
+        print("\n[SYSTEM] Program dihentikan oleh user")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+    finally:
+        # Cleanup
+        send_motor_commands(ser, 0, 0)
+        if ser:
+            ser.close()
+        picam2.stop()
+        cv2.destroyAllWindows()
+        print("[SYSTEM] Cleanup completed")
+
+if __name__ == '__main__':
+    main()
