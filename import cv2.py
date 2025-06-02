@@ -10,22 +10,55 @@ class ErrorFilter:
     def __init__(self, window_size=3):
         self.window_size = window_size
         self.error_history = []
+        self.alpha = 0.7  # Parameter untuk exponential smoothing
 
     def filter_error(self, error):
+        # Kombinasi moving average dan exponential smoothing
         self.error_history.append(error)
         if len(self.error_history) > self.window_size:
             self.error_history.pop(0)
-        return int(sum(self.error_history) / len(self.error_history))
+        
+        # Moving average
+        avg_error = sum(self.error_history) / len(self.error_history)
+        
+        # Exponential smoothing untuk mengurangi noise
+        if len(self.error_history) > 1:
+            prev_avg = sum(self.error_history[:-1]) / len(self.error_history[:-1])
+            smoothed_error = self.alpha * avg_error + (1 - self.alpha) * prev_avg
+        else:
+            smoothed_error = avg_error
+            
+        return int(smoothed_error)
 
 def setup_fuzzy_logic():
-    error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
-    delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
-    output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
+    # Definisi universe yang diperluas untuk responsivitas lebih baik
+    error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
+    delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
+    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
 
-    error.automf(names=['NL', 'NS', 'Z', 'PS', 'PL'])
-    delta.automf(names=['NL', 'NS', 'Z', 'PS', 'PL'])
-    output.automf(names=['L', 'LS', 'Z', 'RS', 'R'])
+    # CUSTOM MEMBERSHIP FUNCTIONS - Dihaluskan untuk gerakan smooth
+    # ERROR - Zona netral diperlebar untuk stabilitas jalur lurus
+    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -60])
+    error['NS'] = fuzz.trimf(error.universe, [-90, -35, -5])
+    error['Z']  = fuzz.trimf(error.universe, [-12, 0, 12])      # Zona netral lebih lebar untuk stability
+    error['PS'] = fuzz.trimf(error.universe, [5, 35, 90])
+    error['PL'] = fuzz.trimf(error.universe, [60, 150, 200])
 
+    # DELTA - Zona netral diperlebar untuk mengurangi oscillation
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -30])
+    delta['NS'] = fuzz.trimf(delta.universe, [-50, -20, -3])
+    delta['Z']  = fuzz.trimf(delta.universe, [-12, 0, 12])      # Zona netral lebih lebar
+    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 50])
+    delta['PL'] = fuzz.trimf(delta.universe, [30, 80, 150])
+
+    # OUTPUT - Output halus dengan transisi gradual
+    output['L']  = fuzz.trimf(output.universe, [-150, -100, -60])
+    output['LS'] = fuzz.trimf(output.universe, [-75, -35, -8])
+    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])    # Zona netral lebih lebar
+    output['RS'] = fuzz.trimf(output.universe, [8, 35, 75])
+    output['R']  = fuzz.trimf(output.universe, [60, 100, 150])
+
+    # Rules yang sama seperti sebelumnya
     rules = [
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
         ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
@@ -97,20 +130,24 @@ def calculate_line_position(roi):
 
 def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
     try:
-        fuzzy_ctrl.input['error'] = np.clip(error_val, -160, 160)
-        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -100, 100)
+        # Sesuaikan range dengan universe yang baru
+        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
+        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
         fuzzy_ctrl.compute()
-        return np.clip(fuzzy_ctrl.output['output'], -100, 100)
+        return np.clip(fuzzy_ctrl.output['output'], -150, 150)
     except Exception as e:
         print(f"[FLC ERROR] {e}")
         return 0.0
 
-def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.2):
+def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.25):
+    # Scaling factor dikurangi untuk gerakan lebih halus
     kontrol_scaled = kontrol * scaling_factor
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
-    pwm_kiri = max(25, min(80, pwm_kiri))
-    pwm_kanan = max(25, min(80, pwm_kanan))
+    
+    # Range PWM yang lebih konservatif untuk gerakan halus
+    pwm_kiri = max(35, min(75, pwm_kiri))  
+    pwm_kanan = max(35, min(75, pwm_kanan))
     return int(pwm_kiri), int(pwm_kanan)
 
 def send_motor_commands(ser, pwm_kiri, pwm_kanan):
@@ -126,7 +163,7 @@ def main():
     fuzzy_ctrl = setup_fuzzy_logic()
     picam2 = setup_camera()
     ser = setup_serial()
-    error_filter = ErrorFilter(window_size=3)
+    error_filter = ErrorFilter(window_size=3)  # Kembalikan smoothing untuk gerakan halus
 
     prev_error = 0
     frame_count = 0
@@ -147,8 +184,10 @@ def main():
                 pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
 
-                if frame_count % 20 == 0:
-                    print(f"[DEBUG] Error: {error}, Delta: {delta_error}, FLC: {kontrol:.2f}, PWM: {pwm_kiri}, {pwm_kanan}")
+                if frame_count % 15 == 0:  # Kurangi monitoring untuk mengurangi noise
+                    print(f"[DEBUG] Error: {error:4d}, Delta: {delta_error:4d}, FLC: {kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
+                    if abs(error) < 10:
+                        print(f"[GOOD]  Jalur lurus stabil: {error}")  # Feedback positif untuk jalur lurus
             else:
                 send_motor_commands(ser, 0, 0)
                 if frame_count % 20 == 0:
@@ -157,7 +196,10 @@ def main():
             # Tampilkan tampilan real-time untuk analisis
             frame_with_line = frame.copy()
             cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
-            cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1) if line_detected else None
+            if line_detected:
+                cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1)
+                # Tambah indikator error
+                cv2.putText(frame_with_line, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             cv2.imshow("Camera View", frame_with_line)
             cv2.imshow("Threshold ROI", roi)
@@ -165,7 +207,7 @@ def main():
                 break
 
             frame_count += 1
-            time.sleep(0.05)
+            time.sleep(0.04)  # Sedikit perlambat untuk stabilitas
     except KeyboardInterrupt:
         print("\n[INFO] Dihentikan oleh pengguna")
     finally:
