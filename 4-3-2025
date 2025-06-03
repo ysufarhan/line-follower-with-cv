@@ -5,6 +5,7 @@ import time
 import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+from datetime import datetime
 
 class ErrorFilter:
     def __init__(self, window_size=3):
@@ -30,30 +31,64 @@ class ErrorFilter:
             
         return int(smoothed_error)
 
-def setup_fuzzy_logic():
-    # Universe disesuaikan dengan kebutuhan obstacle avoidance
+class TurnPredictor:
+    def __init__(self, prediction_window=5):
+        self.prediction_window = prediction_window
+        self.error_trend = []
+        self.turn_threshold = 40  # Threshold untuk mendeteksi belokan
+        
+    def update_trend(self, error):
+        self.error_trend.append(error)
+        if len(self.error_trend) > self.prediction_window:
+            self.error_trend.pop(0)
+    
+    def predict_turn(self):
+        if len(self.error_trend) < 3:
+            return "STRAIGHT", 0
+        
+        # Analisis trend error
+        recent_errors = self.error_trend[-3:]
+        avg_error = sum(recent_errors) / len(recent_errors)
+        error_change = recent_errors[-1] - recent_errors[0]
+        
+        # Prediksi berdasarkan error dan trend
+        if abs(avg_error) > self.turn_threshold:
+            if avg_error > 0:
+                return "TURN_RIGHT", abs(avg_error)
+            else:
+                return "TURN_LEFT", abs(avg_error)
+        elif abs(error_change) > 25:  # Trend berubah cepat
+            if error_change > 0:
+                return "PREPARING_RIGHT", abs(error_change)
+            else:
+                return "PREPARING_LEFT", abs(error_change)
+        else:
+            return "STRAIGHT", abs(avg_error)
+
+def setup_fuzzy_logic_enhanced():
+    """Setup FLC yang dioptimalkan untuk handling belokan"""
     error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
     output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
 
-    # Membership functions yang lebih smooth untuk obstacle avoidance
-    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -60])
-    error['NS'] = fuzz.trimf(error.universe, [-90, -35, -5])
-    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])      # Zona netral diperlebar
-    error['PS'] = fuzz.trimf(error.universe, [5, 35, 90])
-    error['PL'] = fuzz.trimf(error.universe, [60, 150, 200])
+    # Membership functions yang dioptimalkan untuk belokan
+    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -50])
+    error['NS'] = fuzz.trimf(error.universe, [-80, -25, -5])
+    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])
+    error['PS'] = fuzz.trimf(error.universe, [5, 25, 80])
+    error['PL'] = fuzz.trimf(error.universe, [50, 150, 200])
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -30])
-    delta['NS'] = fuzz.trimf(delta.universe, [-50, -20, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])      # Zona netral diperlebar
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 50])
-    delta['PL'] = fuzz.trimf(delta.universe, [30, 80, 150])
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -20])
+    delta['NS'] = fuzz.trimf(delta.universe, [-40, -15, -3])
+    delta['Z']  = fuzz.trimf(delta.universe, [-10, 0, 10])
+    delta['PS'] = fuzz.trimf(delta.universe, [3, 15, 40])
+    delta['PL'] = fuzz.trimf(delta.universe, [20, 80, 150])
 
-    output['L']  = fuzz.trimf(output.universe, [-150, -100, -60])
-    output['LS'] = fuzz.trimf(output.universe, [-75, -35, -8])
-    output['Z']  = fuzz.trimf(output.universe, [-12, 0, 12])    
-    output['RS'] = fuzz.trimf(output.universe, [8, 35, 75])
-    output['R']  = fuzz.trimf(output.universe, [60, 100, 150])
+    output['L']  = fuzz.trimf(output.universe, [-150, -120, -60])
+    output['LS'] = fuzz.trimf(output.universe, [-80, -40, -10])
+    output['Z']  = fuzz.trimf(output.universe, [-15, 0, 15])
+    output['RS'] = fuzz.trimf(output.universe, [10, 40, 80])
+    output['R']  = fuzz.trimf(output.universe, [60, 120, 150])
 
     # Rules yang sama
     rules = [
@@ -100,166 +135,246 @@ def setup_camera():
 
 def setup_serial():
     try:
-        # Sesuaikan dengan baudrate ESP32 (115200)
         ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
-        print("[UART] Port serial berhasil dibuka - ESP32 Ready")
-        time.sleep(2)  # Beri waktu ESP32 untuk siap
+        print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
         print(f"[UART ERROR] Gagal membuka serial port: {e}")
         return None
 
-def process_image(frame):
+def process_image_enhanced(frame, use_otsu=True):
+    """Enhanced image processing dengan multi-level ROI untuk prediksi belokan"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    roi = binary[160:240, :]
-    return gray, binary, roi
+    
+    if use_otsu:
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    else:
+        binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, 11, 2)
+    
+    # Multi-level ROI untuk prediksi
+    roi_near = binary[180:240, :]     # ROI dekat (untuk kontrol langsung)
+    roi_mid = binary[140:180, :]      # ROI tengah (untuk prediksi)
+    roi_far = binary[100:140, :]      # ROI jauh (untuk prediksi awal)
+    
+    return gray, binary, roi_near, roi_mid, roi_far
 
-def calculate_line_position(roi):
+def calculate_line_position_enhanced(roi):
+    """Enhanced line detection dengan lebih robust handling"""
     kernel = np.ones((3,3), np.uint8)
     roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
     roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
+    
+    # Coba dengan moments
     M = cv2.moments(roi_clean)
-    if M['m00'] > 100:
+    if M['m00'] > 50:  # Threshold lebih rendah untuk deteksi lebih sensitif
         cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 160
-        return True, cx, cy
+        return True, cx, M['m00']
+    
+    # Backup method: weighted average
+    white_pixels = np.where(roi_clean > 0)
+    if len(white_pixels[1]) > 10:
+        cx = int(np.mean(white_pixels[1]))
+        return True, cx, len(white_pixels[1])
+    
     return False, 0, 0
 
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
+def compute_fuzzy_control_enhanced(fuzzy_ctrl, error_val, delta_error):
+    """Enhanced fuzzy control dengan error handling yang lebih baik"""
     try:
-        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
-        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
+        # Clamp input values
+        error_val = np.clip(error_val, -200, 200)
+        delta_error = np.clip(delta_error, -150, 150)
+        
+        fuzzy_ctrl.input['error'] = error_val
+        fuzzy_ctrl.input['delta'] = delta_error
         fuzzy_ctrl.compute()
-        return np.clip(fuzzy_ctrl.output['output'], -150, 150)
+        
+        kontrol = fuzzy_ctrl.output['output']
+        return np.clip(kontrol, -150, 150)
+        
     except Exception as e:
         print(f"[FLC ERROR] {e}")
         return 0.0
 
-def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.3):
-    # Sesuaikan dengan ESP32 PWM range (0-100)
-    kontrol_scaled = kontrol * scaling_factor
-    pwm_kiri = base_pwm + kontrol_scaled
-    pwm_kanan = base_pwm - kontrol_scaled
+def calculate_adaptive_motor_pwm(kontrol, turn_state, turn_intensity, base_pwm=55):
+    """Adaptive PWM calculation berdasarkan prediksi belokan"""
     
-    # PWM range untuk ESP32 (0-100), dengan minimum untuk torsi
-    pwm_kiri = max(30, min(80, pwm_kiri))  
+    # Adjust parameters based on turn prediction
+    if turn_state == "STRAIGHT":
+        scaling_factor = 0.2
+        base_speed = base_pwm
+    elif turn_state in ["PREPARING_LEFT", "PREPARING_RIGHT"]:
+        scaling_factor = 0.25  # Sedikit lebih responsif
+        base_speed = base_pwm - 5  # Sedikit perlambat untuk persiapan
+    elif turn_state in ["TURN_LEFT", "TURN_RIGHT"]:
+        scaling_factor = 0.3   # Lebih responsif saat berbelok
+        base_speed = base_pwm - 10  # Perlambat saat berbelok tajam
+        
+        # Adaptive speed based on turn intensity
+        if turn_intensity > 80:  # Belokan sangat tajam
+            base_speed = base_pwm - 15
+            scaling_factor = 0.35
+    else:
+        scaling_factor = 0.2
+        base_speed = base_pwm
+    
+    # Calculate PWM
+    kontrol_scaled = kontrol * scaling_factor
+    pwm_kiri = base_speed + kontrol_scaled
+    pwm_kanan = base_speed - kontrol_scaled
+    
+    # Clamp PWM values
+    pwm_kiri = max(30, min(80, pwm_kiri))
     pwm_kanan = max(30, min(80, pwm_kanan))
+    
     return int(pwm_kiri), int(pwm_kanan)
 
 def send_motor_commands(ser, pwm_kiri, pwm_kanan):
     if ser:
         try:
-            # Format sesuai dengan ESP32: "pwm_kiri,pwm_kanan\n"
             cmd = f"{pwm_kiri},{pwm_kanan}\n"
-            ser.write(cmd.encode('utf-8'))
+            ser.write(cmd.encode())
             ser.flush()
         except Exception as e:
             print(f"[SERIAL ERROR] {e}")
 
-def handle_emergency_stop(ser):
-    """Fungsi untuk menghentikan motor dalam keadaan darurat"""
-    if ser:
-        try:
-            ser.write("0,0\n".encode('utf-8'))
-            ser.flush()
-            print("[EMERGENCY] Motor dihentikan")
-        except:
-            pass
-
 def main():
-    print("[INFO] Inisialisasi sistem Line Following dengan Obstacle Avoidance...")
+    print("[SYSTEM] Starting Enhanced Line Following Robot with Turn Prediction")
     
-    fuzzy_ctrl = setup_fuzzy_logic()
+    # Setup komponen
+    fuzzy_ctrl = setup_fuzzy_logic_enhanced()
     picam2 = setup_camera()
     ser = setup_serial()
     error_filter = ErrorFilter(window_size=3)
-
-    if not ser:
-        print("[ERROR] Tidak dapat melanjutkan tanpa koneksi serial")
-        return
-
+    turn_predictor = TurnPredictor(prediction_window=5)
+    
+    # Variabel kontrol
     prev_error = 0
     frame_count = 0
     lost_line_count = 0
-    max_lost_frames = 10  # Berapa frame boleh kehilangan garis
-
+    max_lost_frames = 10
+    
+    # Parameter yang bisa disesuaikan
+    BASE_PWM = 55
+    SHOW_DEBUG = True  # Set False untuk disable tampilan
+    
+    print(f"[CONFIG] Base PWM: {BASE_PWM}")
+    print(f"[CONFIG] Debug Display: {SHOW_DEBUG}")
+    
     try:
-        print("[INFO] Sistem siap - Tekan 'q' untuk keluar")
         while True:
-            frame = picam2.capture_array()
-            gray, binary, roi = process_image(frame)
-
-            line_detected, cx, cy = calculate_line_position(roi)
+            frame_count += 1
             
-            if line_detected:
-                lost_line_count = 0  # Reset counter
-                error = cx - 160
+            # Capture dan process image
+            frame = picam2.capture_array()
+            gray, binary, roi_near, roi_mid, roi_far = process_image_enhanced(frame)
+            
+            # Deteksi posisi garis di multiple ROI
+            line_detected_near, cx_near, intensity_near = calculate_line_position_enhanced(roi_near)
+            line_detected_mid, cx_mid, intensity_mid = calculate_line_position_enhanced(roi_mid)
+            line_detected_far, cx_far, intensity_far = calculate_line_position_enhanced(roi_far)
+            
+            # Prioritas deteksi: near > mid > far
+            if line_detected_near:
+                cx, cy = cx_near, 210  # Bottom ROI
+                lost_line_count = 0
+            elif line_detected_mid:
+                cx, cy = cx_mid, 160   # Middle ROI
+                lost_line_count = 0
+            elif line_detected_far:
+                cx, cy = cx_far, 120   # Top ROI
+                lost_line_count = 0
+            else:
+                lost_line_count += 1
+                cx, cy = 160, 160  # Default center
+            
+            if lost_line_count < max_lost_frames:
+                # Hitung error dan delta error
+                error = cx - 160  # Setpoint di tengah (160)
                 error = error_filter.filter_error(error)
                 delta_error = error - prev_error
                 prev_error = error
-
-                kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
-                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
+                
+                # Update turn predictor
+                turn_predictor.update_trend(error)
+                turn_state, turn_intensity = turn_predictor.predict_turn()
+                
+                # Compute FLC output
+                kontrol = compute_fuzzy_control_enhanced(fuzzy_ctrl, error, delta_error)
+                
+                # Adaptive PWM calculation
+                pwm_kiri, pwm_kanan = calculate_adaptive_motor_pwm(
+                    kontrol, turn_state, turn_intensity, BASE_PWM)
+                
+                # Kirim command ke motor
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
-
-                # Debug output yang lebih informatif
+                
+                # Debug info
                 if frame_count % 15 == 0:
-                    status = "STRAIGHT" if abs(error) < 15 else ("LEFT" if error < 0 else "RIGHT")
-                    print(f"[{status}] E:{error:4d} | D:{delta_error:4d} | FLC:{kontrol:6.2f} | PWM: L{pwm_kiri} R{pwm_kanan}")
+                    print(f"[DEBUG] Error: {error:3d}, Delta: {delta_error:3d}, "
+                          f"FLC: {kontrol:5.1f}, Turn: {turn_state}, PWM: L={pwm_kiri}, R={pwm_kanan}")
+                
+            else:
+                # Garis hilang terlalu lama - stop
+                send_motor_commands(ser, 0, 0)
+                if frame_count % 20 == 0:
+                    print(f"[WARNING] Line lost for {lost_line_count} frames - stopping")
+            
+            # Tampilan debug (seperti program kedua)
+            if SHOW_DEBUG:
+                frame_display = frame.copy()
+                
+                # Draw ROI boundaries
+                cv2.rectangle(frame_display, (0, 100), (320, 140), (255, 0, 0), 1)  # Far ROI
+                cv2.rectangle(frame_display, (0, 140), (320, 180), (0, 255, 0), 1)  # Mid ROI  
+                cv2.rectangle(frame_display, (0, 180), (320, 240), (0, 0, 255), 1)  # Near ROI
+                
+                # Draw center line
+                cv2.line(frame_display, (160, 0), (160, 240), (255, 255, 0), 1)
+                
+                # Draw detected line position
+                if lost_line_count < max_lost_frames:
+                    cv2.circle(frame_display, (cx, cy), 5, (0, 0, 255), -1)
                     
-            else:
-                lost_line_count += 1
-                if lost_line_count >= max_lost_frames:
-                    # Berhenti jika terlalu lama kehilangan garis
-                    send_motor_commands(ser, 0, 0)
-                    if frame_count % 20 == 0:
-                        print("[WARNING] Garis hilang - Motor dihentikan")
-                else:
-                    # Tetap gunakan kontrol terakhir untuk beberapa frame
-                    if frame_count % 30 == 0:
-                        print(f"[SEARCHING] Mencari garis... ({lost_line_count}/{max_lost_frames})")
-
-            # Display untuk monitoring
-            frame_with_overlay = frame.copy()
-            cv2.line(frame_with_overlay, (160, 160), (160, 240), (0, 255, 0), 2)
+                    # Draw error indicator
+                    error_line_end = 160 + error
+                    cv2.line(frame_display, (160, cy), (error_line_end, cy), (255, 0, 255), 2)
+                
+                # Add text info
+                turn_state, turn_intensity = turn_predictor.predict_turn()
+                cv2.putText(frame_display, f"Error: {error}", (10, 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame_display, f"Turn: {turn_state}", (10, 40), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame_display, f"PWM: L{pwm_kiri} R{pwm_kanan}", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Show displays
+                cv2.imshow("Enhanced Line Following", frame_display)
+                cv2.imshow("Binary", binary)
+                cv2.imshow("ROI Near", roi_near)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
             
-            if line_detected:
-                cv2.circle(frame_with_overlay, (cx, cy), 5, (0, 0, 255), -1)
-                # Status indicator
-                color = (0, 255, 0) if abs(error) < 15 else (0, 255, 255)
-                cv2.putText(frame_with_overlay, f"Error: {error}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            else:
-                cv2.putText(frame_with_overlay, "LINE LOST!", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-            # Obstacle status (informasi dari ESP32 akan tampil di serial monitor ESP32)
-            cv2.putText(frame_with_overlay, "Obstacle Check: ESP32", (10, 220), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-
-            cv2.imshow("Line Following + Obstacle Avoidance", frame_with_overlay)
-            cv2.imshow("Binary ROI", roi)
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-            frame_count += 1
-            time.sleep(0.05)  # 20 FPS - sesuai dengan ESP32 sensor timing
+            # Control loop timing
+            time.sleep(0.04)  # 25 FPS
             
     except KeyboardInterrupt:
-        print("\n[INFO] Dihentikan oleh pengguna")
+        print("\n[SYSTEM] Program dihentikan oleh user")
     except Exception as e:
         print(f"[ERROR] {e}")
     finally:
-        print("[INFO] Membersihkan sistem...")
-        handle_emergency_stop(ser)
+        # Cleanup
+        send_motor_commands(ser, 0, 0)  # Stop motors
         if ser:
             ser.close()
         picam2.stop()
-        cv2.destroyAllWindows()
-        print("[INFO] Program selesai dengan aman")
+        if SHOW_DEBUG:
+            cv2.destroyAllWindows()
+        print("[SYSTEM] Cleanup completed")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
