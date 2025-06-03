@@ -11,115 +11,108 @@ class ErrorFilter:
     def __init__(self, window_size=3):
         self.window_size = window_size
         self.error_history = []
-        self.alpha = 0.7  # Parameter untuk exponential smoothing
 
     def filter_error(self, error):
-        # Kombinasi moving average dan exponential smoothing
         self.error_history.append(error)
         if len(self.error_history) > self.window_size:
             self.error_history.pop(0)
-        
-        # Moving average
-        avg_error = sum(self.error_history) / len(self.error_history)
-        
-        # Exponential smoothing untuk mengurangi noise
-        if len(self.error_history) > 1:
-            prev_avg = sum(self.error_history[:-1]) / len(self.error_history[:-1])
-            smoothed_error = self.alpha * avg_error + (1 - self.alpha) * prev_avg
-        else:
-            smoothed_error = avg_error
-            
-        return int(smoothed_error)
+        return int(sum(self.error_history) / len(self.error_history))
 
-class TurnPredictor:
-    def __init__(self, prediction_window=5):
-        self.prediction_window = prediction_window
-        self.error_trend = []
-        self.turn_threshold = 40  # Threshold untuk mendeteksi belokan
-        
-    def update_trend(self, error):
-        self.error_trend.append(error)
-        if len(self.error_trend) > self.prediction_window:
-            self.error_trend.pop(0)
-    
-    def predict_turn(self):
-        if len(self.error_trend) < 3:
-            return "STRAIGHT", 0
-        
-        # Analisis trend error
-        recent_errors = self.error_trend[-3:]
-        avg_error = sum(recent_errors) / len(recent_errors)
-        error_change = recent_errors[-1] - recent_errors[0]
-        
-        # Prediksi berdasarkan error dan trend
-        if abs(avg_error) > self.turn_threshold:
-            if avg_error > 0:
-                return "TURN_RIGHT", abs(avg_error)
-            else:
-                return "TURN_LEFT", abs(avg_error)
-        elif abs(error_change) > 25:  # Trend berubah cepat
-            if error_change > 0:
-                return "PREPARING_RIGHT", abs(error_change)
-            else:
-                return "PREPARING_LEFT", abs(error_change)
-        else:
-            return "STRAIGHT", abs(avg_error)
-
-def setup_fuzzy_logic_enhanced():
-    """Setup FLC yang dioptimalkan untuk handling belokan"""
+def setup_fuzzy_logic_responsive():
+    """Setup FLC dengan range error yang lebih besar dan rules yang lebih responsif"""
     error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
-    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
+    output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
 
-    # Membership functions yang dioptimalkan untuk belokan
-    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -50])
-    error['NS'] = fuzz.trimf(error.universe, [-80, -25, -5])
+    # Membership functions dengan range lebih luas untuk deteksi dini
+    error['NL'] = fuzz.trimf(error.universe, [-200, -200, -80])
+    error['NM'] = fuzz.trimf(error.universe, [-120, -60, -20])
+    error['NS'] = fuzz.trimf(error.universe, [-40, -20, -5])
     error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])
-    error['PS'] = fuzz.trimf(error.universe, [5, 25, 80])
-    error['PL'] = fuzz.trimf(error.universe, [50, 150, 200])
+    error['PS'] = fuzz.trimf(error.universe, [5, 20, 40])
+    error['PM'] = fuzz.trimf(error.universe, [20, 60, 120])
+    error['PL'] = fuzz.trimf(error.universe, [80, 200, 200])
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -20])
-    delta['NS'] = fuzz.trimf(delta.universe, [-40, -15, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-10, 0, 10])
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 15, 40])
-    delta['PL'] = fuzz.trimf(delta.universe, [20, 80, 150])
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -150, -60])
+    delta['NM'] = fuzz.trimf(delta.universe, [-80, -40, -15])
+    delta['NS'] = fuzz.trimf(delta.universe, [-25, -10, -3])
+    delta['Z']  = fuzz.trimf(delta.universe, [-8, 0, 8])
+    delta['PS'] = fuzz.trimf(delta.universe, [3, 10, 25])
+    delta['PM'] = fuzz.trimf(delta.universe, [15, 40, 80])
+    delta['PL'] = fuzz.trimf(delta.universe, [60, 150, 150])
 
-    output['L']  = fuzz.trimf(output.universe, [-150, -120, -60])
-    output['LS'] = fuzz.trimf(output.universe, [-80, -40, -10])
-    output['Z']  = fuzz.trimf(output.universe, [-15, 0, 15])
-    output['RS'] = fuzz.trimf(output.universe, [10, 40, 80])
-    output['R']  = fuzz.trimf(output.universe, [60, 120, 150])
+    # Output dengan gradasi lebih halus
+    output['L']  = fuzz.trimf(output.universe, [-100, -100, -60])
+    output['LM'] = fuzz.trimf(output.universe, [-80, -50, -25])
+    output['LS'] = fuzz.trimf(output.universe, [-40, -20, -5])
+    output['Z']  = fuzz.trimf(output.universe, [-8, 0, 8])
+    output['RS'] = fuzz.trimf(output.universe, [5, 20, 40])
+    output['RM'] = fuzz.trimf(output.universe, [25, 50, 80])
+    output['R']  = fuzz.trimf(output.universe, [60, 100, 100])
 
-    # Rules yang sama
+    # Rules dengan lebih banyak gradasi untuk respons halus
     rules = [
+        # Error Negative Large
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['NM'], output['LM']),
+        ctrl.Rule(error['NL'] & delta['NS'], output['LM']),
         ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),
+        ctrl.Rule(error['NL'] & delta['PS'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['PM'], output['Z']),
         ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
 
+        # Error Negative Medium
+        ctrl.Rule(error['NM'] & delta['NL'], output['LM']),
+        ctrl.Rule(error['NM'] & delta['NM'], output['LM']),
+        ctrl.Rule(error['NM'] & delta['NS'], output['LS']),
+        ctrl.Rule(error['NM'] & delta['Z'], output['LS']),
+        ctrl.Rule(error['NM'] & delta['PS'], output['Z']),
+        ctrl.Rule(error['NM'] & delta['PM'], output['Z']),
+        ctrl.Rule(error['NM'] & delta['PL'], output['RS']),
+
+        # Error Negative Small
         ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
+        ctrl.Rule(error['NS'] & delta['NM'], output['LS']),
         ctrl.Rule(error['NS'] & delta['NS'], output['LS']),
         ctrl.Rule(error['NS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
+        ctrl.Rule(error['NS'] & delta['PM'], output['RS']),
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
+        # Error Zero
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
+        ctrl.Rule(error['Z'] & delta['NM'], output['LS']),
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
+        ctrl.Rule(error['Z'] & delta['PM'], output['RS']),
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
+        # Error Positive Small
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
+        ctrl.Rule(error['PS'] & delta['NM'], output['LS']),
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
         ctrl.Rule(error['PS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['PS'] & delta['PS'], output['RS']),
+        ctrl.Rule(error['PS'] & delta['PM'], output['RS']),
         ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
 
+        # Error Positive Medium
+        ctrl.Rule(error['PM'] & delta['NL'], output['LS']),
+        ctrl.Rule(error['PM'] & delta['NM'], output['Z']),
+        ctrl.Rule(error['PM'] & delta['NS'], output['Z']),
+        ctrl.Rule(error['PM'] & delta['Z'], output['RS']),
+        ctrl.Rule(error['PM'] & delta['PS'], output['RS']),
+        ctrl.Rule(error['PM'] & delta['PM'], output['RM']),
+        ctrl.Rule(error['PM'] & delta['PL'], output['RM']),
+
+        # Error Positive Large
         ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
+        ctrl.Rule(error['PL'] & delta['NM'], output['Z']),
+        ctrl.Rule(error['PL'] & delta['NS'], output['RS']),
         ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['PS'], output['RM']),
+        ctrl.Rule(error['PL'] & delta['PM'], output['RM']),
         ctrl.Rule(error['PL'] & delta['PL'], output['R']),
     ]
 
@@ -142,8 +135,8 @@ def setup_serial():
         print(f"[UART ERROR] Gagal membuka serial port: {e}")
         return None
 
-def process_image_enhanced(frame, use_otsu=True):
-    """Enhanced image processing dengan multi-level ROI untuk prediksi belokan"""
+def process_image_multi_roi(frame, use_otsu=True):
+    """Process image dengan multiple ROI untuk deteksi lebih jauh"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
@@ -153,81 +146,97 @@ def process_image_enhanced(frame, use_otsu=True):
         binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                        cv2.THRESH_BINARY_INV, 11, 2)
     
-    # Multi-level ROI untuk prediksi
-    roi_near = binary[180:240, :]     # ROI dekat (untuk kontrol langsung)
-    roi_mid = binary[140:180, :]      # ROI tengah (untuk prediksi)
-    roi_far = binary[100:140, :]      # ROI jauh (untuk prediksi awal)
+    # Multiple ROI dengan jarak yang berbeda
+    # ROI jauh (untuk deteksi dini): baris 100-140
+    roi_far = binary[100:140, :]
+    # ROI menengah: baris 140-180  
+    roi_mid = binary[140:180, :]
+    # ROI dekat: baris 180-220
+    roi_near = binary[180:220, :]
     
-    return gray, binary, roi_near, roi_mid, roi_far
+    return gray, binary, roi_far, roi_mid, roi_near
 
-def calculate_line_position_enhanced(roi):
-    """Enhanced line detection dengan lebih robust handling"""
+def calculate_weighted_line_position(roi_far, roi_mid, roi_near):
+    """
+    Calculate line position dengan weighted average dari multiple ROI
+    ROI yang lebih jauh diberi bobot lebih tinggi untuk respons lebih cepat
+    """
     kernel = np.ones((3,3), np.uint8)
-    roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
-    roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
     
-    # Coba dengan moments
-    M = cv2.moments(roi_clean)
-    if M['m00'] > 50:  # Threshold lebih rendah untuk deteksi lebih sensitif
-        cx = int(M['m10'] / M['m00'])
-        return True, cx, M['m00']
+    positions = []
+    weights = []
     
-    # Backup method: weighted average
-    white_pixels = np.where(roi_clean > 0)
-    if len(white_pixels[1]) > 10:
-        cx = int(np.mean(white_pixels[1]))
-        return True, cx, len(white_pixels[1])
+    # Process ROI jauh (bobot tertinggi)
+    roi_far_clean = cv2.morphologyEx(roi_far, cv2.MORPH_CLOSE, kernel)
+    roi_far_clean = cv2.morphologyEx(roi_far_clean, cv2.MORPH_OPEN, kernel)
+    M_far = cv2.moments(roi_far_clean)
+    if M_far['m00'] > 50:  # threshold lebih rendah untuk ROI jauh
+        cx_far = int(M_far['m10'] / M_far['m00'])
+        positions.append(cx_far)
+        weights.append(3.0)  # Bobot tertinggi
+    
+    # Process ROI menengah
+    roi_mid_clean = cv2.morphologyEx(roi_mid, cv2.MORPH_CLOSE, kernel)
+    roi_mid_clean = cv2.morphologyEx(roi_mid_clean, cv2.MORPH_OPEN, kernel)
+    M_mid = cv2.moments(roi_mid_clean)
+    if M_mid['m00'] > 75:
+        cx_mid = int(M_mid['m10'] / M_mid['m00'])
+        positions.append(cx_mid)
+        weights.append(2.0)
+    
+    # Process ROI dekat (bobot terendah)
+    roi_near_clean = cv2.morphologyEx(roi_near, cv2.MORPH_CLOSE, kernel)
+    roi_near_clean = cv2.morphologyEx(roi_near_clean, cv2.MORPH_OPEN, kernel)
+    M_near = cv2.moments(roi_near_clean)
+    if M_near['m00'] > 100:
+        cx_near = int(M_near['m10'] / M_near['m00'])
+        positions.append(cx_near)
+        weights.append(1.0)  # Bobot terendah
+    
+    # Calculate weighted average
+    if positions:
+        weighted_sum = sum(pos * weight for pos, weight in zip(positions, weights))
+        total_weight = sum(weights)
+        weighted_cx = int(weighted_sum / total_weight)
+        return True, weighted_cx, len(positions)
     
     return False, 0, 0
 
-def compute_fuzzy_control_enhanced(fuzzy_ctrl, error_val, delta_error):
-    """Enhanced fuzzy control dengan error handling yang lebih baik"""
+def compute_fuzzy_control_responsive(fuzzy_ctrl, error_val, delta_error):
+    """Compute fuzzy control dengan range error yang lebih besar"""
     try:
-        # Clamp input values
-        error_val = np.clip(error_val, -200, 200)
-        delta_error = np.clip(delta_error, -150, 150)
+        # Clamp input values dengan range lebih besar
+        error_val = max(-200, min(200, error_val))
+        delta_error = max(-150, min(150, delta_error))
         
         fuzzy_ctrl.input['error'] = error_val
         fuzzy_ctrl.input['delta'] = delta_error
         fuzzy_ctrl.compute()
         
         kontrol = fuzzy_ctrl.output['output']
-        return np.clip(kontrol, -150, 150)
+        
+        # Clip output untuk keamanan
+        return np.clip(kontrol, -100, 100)
         
     except Exception as e:
         print(f"[FLC ERROR] {e}")
         return 0.0
 
-def calculate_adaptive_motor_pwm(kontrol, turn_state, turn_intensity, base_pwm=55):
-    """Adaptive PWM calculation berdasarkan prediksi belokan"""
+def calculate_adaptive_motor_pwm(kontrol, base_pwm=55, scaling_factor=0.25, speed_boost=1.0):
+    """
+    Adaptive PWM calculation dengan speed boost untuk respons lebih cepat
+    """
+    # Adaptive scaling berdasarkan magnitude error
+    adaptive_scale = scaling_factor * speed_boost
+    kontrol_scaled = kontrol * adaptive_scale
     
-    # Adjust parameters based on turn prediction
-    if turn_state == "STRAIGHT":
-        scaling_factor = 0.2
-        base_speed = base_pwm
-    elif turn_state in ["PREPARING_LEFT", "PREPARING_RIGHT"]:
-        scaling_factor = 0.25  # Sedikit lebih responsif
-        base_speed = base_pwm - 5  # Sedikit perlambat untuk persiapan
-    elif turn_state in ["TURN_LEFT", "TURN_RIGHT"]:
-        scaling_factor = 0.3   # Lebih responsif saat berbelok
-        base_speed = base_pwm - 10  # Perlambat saat berbelok tajam
-        
-        # Adaptive speed based on turn intensity
-        if turn_intensity > 80:  # Belokan sangat tajam
-            base_speed = base_pwm - 15
-            scaling_factor = 0.35
-    else:
-        scaling_factor = 0.2
-        base_speed = base_pwm
+    # Hitung PWM untuk masing-masing motor
+    pwm_kiri = base_pwm + kontrol_scaled
+    pwm_kanan = base_pwm - kontrol_scaled
     
-    # Calculate PWM
-    kontrol_scaled = kontrol * scaling_factor
-    pwm_kiri = base_speed + kontrol_scaled
-    pwm_kanan = base_speed - kontrol_scaled
-    
-    # Clamp PWM values
-    pwm_kiri = max(30, min(80, pwm_kiri))
-    pwm_kanan = max(30, min(80, pwm_kanan))
+    # Clamp PWM values ke range yang aman
+    pwm_kiri = max(25, min(85, pwm_kiri))  # Range sedikit lebih tinggi
+    pwm_kanan = max(25, min(85, pwm_kanan))
     
     return int(pwm_kiri), int(pwm_kanan)
 
@@ -241,126 +250,71 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
             print(f"[SERIAL ERROR] {e}")
 
 def main():
-    print("[SYSTEM] Starting Enhanced Line Following Robot with Turn Prediction")
+    print("[SYSTEM] Starting Line Following Robot - Responsive Multi-ROI Mode")
     
     # Setup komponen
-    fuzzy_ctrl = setup_fuzzy_logic_enhanced()
+    fuzzy_ctrl = setup_fuzzy_logic_responsive()
     picam2 = setup_camera()
     ser = setup_serial()
-    error_filter = ErrorFilter(window_size=3)
-    turn_predictor = TurnPredictor(prediction_window=5)
+    error_filter = ErrorFilter(window_size=2)  # Window lebih kecil untuk respons cepat
     
     # Variabel kontrol
     prev_error = 0
     frame_count = 0
-    lost_line_count = 0
-    max_lost_frames = 10
     
-    # Parameter yang bisa disesuaikan
-    BASE_PWM = 55
-    SHOW_DEBUG = True  # Set False untuk disable tampilan
+    # Parameter yang dapat disesuaikan
+    BASE_PWM = 60           # Kecepatan dasar sedikit lebih tinggi
+    SCALING_FACTOR = 0.3    # Scaling lebih agresif
+    SPEED_BOOST = 1.2       # Boost untuk respons cepat
     
-    print(f"[CONFIG] Base PWM: {BASE_PWM}")
-    print(f"[CONFIG] Debug Display: {SHOW_DEBUG}")
+    print(f"[CONFIG] Base PWM: {BASE_PWM}, Scaling: {SCALING_FACTOR}, Boost: {SPEED_BOOST}")
+    print("[CONFIG] Multi-ROI: Far(100-140), Mid(140-180), Near(180-220)")
     
     try:
         while True:
             frame_count += 1
             
-            # Capture dan process image
+            # Capture dan process image dengan multiple ROI
             frame = picam2.capture_array()
-            gray, binary, roi_near, roi_mid, roi_far = process_image_enhanced(frame)
+            _, _, roi_far, roi_mid, roi_near = process_image_multi_roi(frame)
             
-            # Deteksi posisi garis di multiple ROI
-            line_detected_near, cx_near, intensity_near = calculate_line_position_enhanced(roi_near)
-            line_detected_mid, cx_mid, intensity_mid = calculate_line_position_enhanced(roi_mid)
-            line_detected_far, cx_far, intensity_far = calculate_line_position_enhanced(roi_far)
+            # Deteksi posisi garis dengan weighted average
+            line_detected, cx, roi_count = calculate_weighted_line_position(roi_far, roi_mid, roi_near)
             
-            # Prioritas deteksi: near > mid > far
-            if line_detected_near:
-                cx, cy = cx_near, 210  # Bottom ROI
-                lost_line_count = 0
-            elif line_detected_mid:
-                cx, cy = cx_mid, 160   # Middle ROI
-                lost_line_count = 0
-            elif line_detected_far:
-                cx, cy = cx_far, 120   # Top ROI
-                lost_line_count = 0
-            else:
-                lost_line_count += 1
-                cx, cy = 160, 160  # Default center
-            
-            if lost_line_count < max_lost_frames:
+            if line_detected:
                 # Hitung error dan delta error
                 error = cx - 160  # Setpoint di tengah (160)
                 error = error_filter.filter_error(error)
                 delta_error = error - prev_error
                 prev_error = error
                 
-                # Update turn predictor
-                turn_predictor.update_trend(error)
-                turn_state, turn_intensity = turn_predictor.predict_turn()
+                # Adaptive speed boost berdasarkan jumlah ROI yang mendeteksi
+                current_boost = SPEED_BOOST * (1.0 + 0.1 * roi_count)
                 
                 # Compute FLC output
-                kontrol = compute_fuzzy_control_enhanced(fuzzy_ctrl, error, delta_error)
+                kontrol = compute_fuzzy_control_responsive(fuzzy_ctrl, error, delta_error)
                 
-                # Adaptive PWM calculation
+                # Hitung PWM dengan adaptive scaling
                 pwm_kiri, pwm_kanan = calculate_adaptive_motor_pwm(
-                    kontrol, turn_state, turn_intensity, BASE_PWM)
+                    kontrol, BASE_PWM, SCALING_FACTOR, current_boost
+                )
                 
                 # Kirim command ke motor
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
                 
-                # Debug info
+                # Debug info setiap 15 frame (lebih sering)
                 if frame_count % 15 == 0:
-                    print(f"[DEBUG] Error: {error:3d}, Delta: {delta_error:3d}, "
-                          f"FLC: {kontrol:5.1f}, Turn: {turn_state}, PWM: L={pwm_kiri}, R={pwm_kanan}")
+                    print(f"[DEBUG] ROI: {roi_count}, Error: {error:3d}, Delta: {delta_error:3d}, "
+                          f"FLC: {kontrol:5.1f}, Boost: {current_boost:.1f}, PWM: L={pwm_kiri}, R={pwm_kanan}")
                 
             else:
-                # Garis hilang terlalu lama - stop
-                send_motor_commands(ser, 0, 0)
-                if frame_count % 20 == 0:
-                    print(f"[WARNING] Line lost for {lost_line_count} frames - stopping")
+                # Garis tidak terdeteksi - rotasi pelan untuk mencari garis
+                send_motor_commands(ser, 35, 25)  # Rotasi kiri pelan
+                if frame_count % 15 == 0:
+                    print("[DEBUG] Line not detected - searching...")
             
-            # Tampilan debug (seperti program kedua)
-            if SHOW_DEBUG:
-                frame_display = frame.copy()
-                
-                # Draw ROI boundaries
-                cv2.rectangle(frame_display, (0, 100), (320, 140), (255, 0, 0), 1)  # Far ROI
-                cv2.rectangle(frame_display, (0, 140), (320, 180), (0, 255, 0), 1)  # Mid ROI  
-                cv2.rectangle(frame_display, (0, 180), (320, 240), (0, 0, 255), 1)  # Near ROI
-                
-                # Draw center line
-                cv2.line(frame_display, (160, 0), (160, 240), (255, 255, 0), 1)
-                
-                # Draw detected line position
-                if lost_line_count < max_lost_frames:
-                    cv2.circle(frame_display, (cx, cy), 5, (0, 0, 255), -1)
-                    
-                    # Draw error indicator
-                    error_line_end = 160 + error
-                    cv2.line(frame_display, (160, cy), (error_line_end, cy), (255, 0, 255), 2)
-                
-                # Add text info
-                turn_state, turn_intensity = turn_predictor.predict_turn()
-                cv2.putText(frame_display, f"Error: {error}", (10, 20), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(frame_display, f"Turn: {turn_state}", (10, 40), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                cv2.putText(frame_display, f"PWM: L{pwm_kiri} R{pwm_kanan}", (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                
-                # Show displays
-                cv2.imshow("Enhanced Line Following", frame_display)
-                cv2.imshow("Binary", binary)
-                cv2.imshow("ROI Near", roi_near)
-                
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-            
-            # Control loop timing
-            time.sleep(0.04)  # 25 FPS
+            # Delay lebih kecil untuk respons lebih cepat
+            time.sleep(0.03)  # ~33 FPS
             
     except KeyboardInterrupt:
         print("\n[SYSTEM] Program dihentikan oleh user")
@@ -372,8 +326,6 @@ def main():
         if ser:
             ser.close()
         picam2.stop()
-        if SHOW_DEBUG:
-            cv2.destroyAllWindows()
         print("[SYSTEM] Cleanup completed")
 
 if __name__ == '__main__':
