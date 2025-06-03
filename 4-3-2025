@@ -6,153 +6,75 @@ import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
 
-class AdaptiveErrorFilter:
+class ErrorFilter:
     def __init__(self, window_size=3):
         self.window_size = window_size
         self.error_history = []
-        self.alpha = 0.7
-        self.last_filtered = 0
-        
+
     def filter_error(self, error):
         self.error_history.append(error)
         if len(self.error_history) > self.window_size:
             self.error_history.pop(0)
-        
-        # Moving average
-        avg_error = sum(self.error_history) / len(self.error_history)
-        
-        # Adaptive smoothing - more responsive for large errors
-        if abs(error) > 60:
-            alpha = 0.8  # More responsive for turns
-        else:
-            alpha = 0.6  # More stable for straight lines
-            
-        if len(self.error_history) > 1:
-            self.last_filtered = alpha * avg_error + (1 - alpha) * self.last_filtered
-        else:
-            self.last_filtered = avg_error
-            
-        return int(self.last_filtered)
+        return int(sum(self.error_history) / len(self.error_history))
 
-class LineTracker:
-    def __init__(self):
-        self.lost_line_counter = 0
-        self.last_known_cx = 160
-        self.line_history = []
-        self.max_history = 5
-        
-    def update_line_position(self, found, cx):
-        if found:
-            self.last_known_cx = cx
-            self.lost_line_counter = 0
-            self.line_history.append(cx)
-            if len(self.line_history) > self.max_history:
-                self.line_history.pop(0)
-        else:
-            self.lost_line_counter += 1
-            
-    def get_recovery_error(self):
-        """Return error for line recovery based on last known position"""
-        if self.lost_line_counter > 0:
-            return self.last_known_cx - 160
-        return 0
-
-def setup_enhanced_fuzzy_logic():
-    """Enhanced FLC optimized for Raspberry Pi with better turn response"""
-    
-    # Optimized universe ranges
+def setup_fuzzy_logic():
+    # Definisi universe yang diperluas untuk responsivitas lebih baik
     error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
-    delta = ctrl.Antecedent(np.arange(-120, 121, 1), 'delta')
-    output = ctrl.Consequent(np.arange(-120, 121, 1), 'output')
+    delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
+    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
 
-    # Enhanced ERROR membership - asymmetric for better turn detection
-    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -70])
-    error['NM'] = fuzz.trimf(error.universe, [-100, -50, -15])
-    error['NS'] = fuzz.trimf(error.universe, [-35, -15, -3])
-    error['Z']  = fuzz.trimf(error.universe, [-8, 0, 8])
-    error['PS'] = fuzz.trimf(error.universe, [3, 15, 35])
-    error['PM'] = fuzz.trimf(error.universe, [15, 50, 100])
-    error['PL'] = fuzz.trimf(error.universe, [70, 150, 200])
+    # CUSTOM MEMBERSHIP FUNCTIONS - Fine-tuned untuk mengurangi error
+    # ERROR - Lebih sensitif pada zona kecil untuk presisi tinggi
+    error['NL'] = fuzz.trimf(error.universe, [-200, -160, -70])
+    error['NS'] = fuzz.trimf(error.universe, [-100, -40, -8])
+    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])      # Zona netral lebih sempit
+    error['PS'] = fuzz.trimf(error.universe, [8, 40, 100])
+    error['PL'] = fuzz.trimf(error.universe, [70, 160, 200])
 
-    # Enhanced DELTA - more sensitive to direction changes
-    delta['NL'] = fuzz.trimf(delta.universe, [-120, -80, -30])
-    delta['NM'] = fuzz.trimf(delta.universe, [-50, -25, -8])
-    delta['NS'] = fuzz.trimf(delta.universe, [-15, -5, -1])
-    delta['Z']  = fuzz.trimf(delta.universe, [-3, 0, 3])
-    delta['PS'] = fuzz.trimf(delta.universe, [1, 5, 15])
-    delta['PM'] = fuzz.trimf(delta.universe, [8, 25, 50])
-    delta['PL'] = fuzz.trimf(delta.universe, [30, 80, 120])
+    # DELTA - Lebih agresif untuk koreksi cepat
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -100, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-60, -25, -4])
+    delta['Z']  = fuzz.trimf(delta.universe, [-8, 0, 8])        # Zona netral lebih sempit
+    delta['PS'] = fuzz.trimf(delta.universe, [4, 25, 60])
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 150])
 
-    # Enhanced OUTPUT - more aggressive for turns
-    output['L']  = fuzz.trimf(output.universe, [-120, -100, -60])
-    output['LM'] = fuzz.trimf(output.universe, [-80, -45, -20])
-    output['LS'] = fuzz.trimf(output.universe, [-35, -15, -3])
-    output['Z']  = fuzz.trimf(output.universe, [-5, 0, 5])
-    output['RS'] = fuzz.trimf(output.universe, [3, 15, 35])
-    output['RM'] = fuzz.trimf(output.universe, [20, 45, 80])
-    output['R']  = fuzz.trimf(output.universe, [60, 100, 120])
+    # OUTPUT - Lebih agresif pada koreksi kecil dan besar
+    output['L']  = fuzz.trimf(output.universe, [-150, -110, -75])
+    output['LS'] = fuzz.trimf(output.universe, [-85, -45, -12])
+    output['Z']  = fuzz.trimf(output.universe, [-5, 0, 5])      # Zona netral sangat sempit
+    output['RS'] = fuzz.trimf(output.universe, [12, 45, 85])
+    output['R']  = fuzz.trimf(output.universe, [75, 110, 150])
 
-    # Enhanced rule base with more aggressive turning
+    # Rules yang sama seperti sebelumnya
     rules = [
-        # Very large errors - aggressive correction
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NM'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['LM']),
-        ctrl.Rule(error['NL'] & delta['Z'], output['LM']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PM'], output['Z']),
-        ctrl.Rule(error['NL'] & delta['PL'], output['RS']),
+        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),
+        ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
 
-        # Large errors
-        ctrl.Rule(error['NM'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NM'] & delta['NM'], output['LM']),
-        ctrl.Rule(error['NM'] & delta['NS'], output['LM']),
-        ctrl.Rule(error['NM'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NM'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NM'] & delta['PM'], output['RS']),
-        ctrl.Rule(error['NM'] & delta['PL'], output['RM']),
-
-        # Small errors
-        ctrl.Rule(error['NS'] & delta['NL'], output['LM']),
-        ctrl.Rule(error['NS'] & delta['NM'], output['LS']),
+        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['NS'] & delta['NS'], output['LS']),
         ctrl.Rule(error['NS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PM'], output['RS']),
-        ctrl.Rule(error['NS'] & delta['PL'], output['RM']),
+        ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        # Zero error - stability focus
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['Z'] & delta['NM'], output['LS']),
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PM'], output['RS']),
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
-        # Positive errors - mirror of negative
-        ctrl.Rule(error['PS'] & delta['NL'], output['LM']),
-        ctrl.Rule(error['PS'] & delta['NM'], output['LS']),
+        ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
         ctrl.Rule(error['PS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['PS'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PM'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PL'], output['RM']),
+        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
 
-        ctrl.Rule(error['PM'] & delta['NL'], output['LM']),
-        ctrl.Rule(error['PM'] & delta['NM'], output['LS']),
-        ctrl.Rule(error['PM'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PM'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PM'] & delta['PS'], output['RM']),
-        ctrl.Rule(error['PM'] & delta['PM'], output['RM']),
-        ctrl.Rule(error['PM'] & delta['PL'], output['R']),
-
-        ctrl.Rule(error['PL'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['PL'] & delta['NM'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['Z'], output['RM']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RM']),
-        ctrl.Rule(error['PL'] & delta['PM'], output['R']),
+        ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
+        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
+        ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
         ctrl.Rule(error['PL'] & delta['PL'], output['R']),
     ]
 
@@ -160,7 +82,6 @@ def setup_enhanced_fuzzy_logic():
     return ctrl.ControlSystemSimulation(control_system)
 
 def setup_camera():
-    """Setup camera with optimized settings for Raspberry Pi"""
     picam2 = Picamera2()
     config = picam2.create_still_configuration(main={"size": (320, 240)})
     picam2.configure(config)
@@ -168,118 +89,55 @@ def setup_camera():
     return picam2
 
 def setup_serial():
-    """Setup serial communication"""
     try:
-        ser = serial.Serial('/dev/serial0', 115200, timeout=1)
+        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
         print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
         print(f"[UART ERROR] Gagal membuka serial port: {e}")
         return None
 
-def process_image_otsu(frame):
-    """Enhanced image processing with Otsu thresholding for better line detection"""
-    # Convert to grayscale
+def process_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Apply Gaussian blur to reduce noise
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Apply Otsu's thresholding
-    # For line following, we want the line to be white on black background
-    # If your line is black on white background, use cv2.THRESH_BINARY instead
-    threshold_value, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    # Optional: Display the threshold value for debugging
-    if hasattr(process_image_otsu, 'frame_count'):
-        process_image_otsu.frame_count += 1
-        if process_image_otsu.frame_count % 30 == 0:  # Print every 30 frames
-            print(f"[OTSU] Threshold value: {threshold_value:.1f}")
-    else:
-        process_image_otsu.frame_count = 1
-        print(f"[OTSU] Initial threshold value: {threshold_value:.1f}")
-    
-    # Define ROI - expanded for better detection
-    roi = binary[140:240, :]
-    
-    return gray, binary, roi, threshold_value
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    roi = binary[160:240, :]
+    return gray, binary, roi
 
-def calculate_line_position_enhanced(roi):
-    """Enhanced line position calculation with better filtering"""
-    # Morphological operations for noise removal
+def calculate_line_position(roi):
     kernel = np.ones((3,3), np.uint8)
     roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
     roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
-    
-    # Remove small noise
-    roi_clean = cv2.medianBlur(roi_clean, 3)
-    
-    # Calculate moments
     M = cv2.moments(roi_clean)
-    
-    if M['m00'] > 50:  # Lower threshold for better detection
+    if M['m00'] > 100:
         cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 140  # Adjust for ROI offset
-        
-        # Additional validation - check if line is reasonable
-        if 20 <= cx <= 300:  # Valid x range
-            return True, cx, cy
-    
+        cy = int(M['m01'] / M['m00']) + 160
+        return True, cx, cy
     return False, 0, 0
 
-def compute_enhanced_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
-    """Enhanced fuzzy control computation with error handling"""
+def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
     try:
-        # Clamp inputs to valid ranges
-        error_val = max(-200, min(200, error_val))
-        delta_error = max(-120, min(120, delta_error))
-        
-        fuzzy_ctrl.input['error'] = error_val
-        fuzzy_ctrl.input['delta'] = delta_error
+        # Sesuaikan range dengan universe yang baru
+        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
+        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
         fuzzy_ctrl.compute()
-        
-        kontrol = fuzzy_ctrl.output['output']
-        return np.clip(kontrol, -120, 120)
-        
+        return np.clip(fuzzy_ctrl.output['output'], -150, 150)
     except Exception as e:
         print(f"[FLC ERROR] {e}")
         return 0.0
 
-def calculate_adaptive_motor_pwm(kontrol, error_magnitude, base_pwm=55):
-    """Adaptive PWM calculation based on error magnitude"""
-    
-    # Dynamic scaling based on error magnitude
-    if abs(error_magnitude) > 80:
-        # Large error - aggressive response for sharp turns
-        scaling_factor = 0.35
-        base_pwm = 50  # Slightly slower for stability during turns
-    elif abs(error_magnitude) > 40:
-        # Medium error - moderate response
-        scaling_factor = 0.25
-        base_pwm = 55
-    else:
-        # Small error - gentle response for straight lines
-        scaling_factor = 0.18
-        base_pwm = 58  # Faster for straight sections
-    
-    # Calculate motor PWM
+def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.4):
+    # Tingkatkan scaling_factor untuk koreksi lebih agresif
     kontrol_scaled = kontrol * scaling_factor
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
     
-    # Adaptive PWM limits based on turn severity
-    if abs(kontrol) > 60:  # Sharp turn
-        pwm_min, pwm_max = 20, 85
-    else:  # Normal operation
-        pwm_min, pwm_max = 30, 75
-    
-    pwm_kiri = max(pwm_min, min(pwm_max, pwm_kiri))
-    pwm_kanan = max(pwm_min, min(pwm_max, pwm_kanan))
-    
+    # Pastikan PWM tidak terlalu rendah yang bisa menyebabkan motor berhenti
+    pwm_kiri = max(30, min(85, pwm_kiri))  
+    pwm_kanan = max(30, min(85, pwm_kanan))
     return int(pwm_kiri), int(pwm_kanan)
 
 def send_motor_commands(ser, pwm_kiri, pwm_kanan):
-    """Send motor commands via serial"""
     if ser:
         try:
             cmd = f"{pwm_kiri},{pwm_kanan}\n"
@@ -289,131 +147,63 @@ def send_motor_commands(ser, pwm_kiri, pwm_kanan):
             print(f"[SERIAL ERROR] {e}")
 
 def main():
-    print("[SYSTEM] Starting Enhanced Line Following Robot with Otsu Thresholding")
-    print("[INFO] Optimized for Raspberry Pi 4 Model B")
-    
-    # Setup komponen
-    fuzzy_ctrl = setup_enhanced_fuzzy_logic()
+    fuzzy_ctrl = setup_fuzzy_logic()
     picam2 = setup_camera()
     ser = setup_serial()
-    error_filter = AdaptiveErrorFilter(window_size=3)
-    line_tracker = LineTracker()
-    
-    # Control variables
+    error_filter = ErrorFilter(window_size=1)  # Hilangkan filtering untuk respons maksimal
+
     prev_error = 0
     frame_count = 0
-    performance_stats = {'straight_count': 0, 'turn_count': 0}
-    threshold_stats = {'min_threshold': 255, 'max_threshold': 0, 'avg_threshold': 0, 'threshold_sum': 0}
-    
-    print("[SYSTEM] Semua komponen siap - mulai line following dengan Otsu thresholding")
-    
+
     try:
         while True:
-            frame_count += 1
-            
-            # Capture dan process frame with Otsu thresholding
             frame = picam2.capture_array()
-            gray, binary, roi, threshold_value = process_image_otsu(frame)
-            
-            # Update threshold statistics
-            threshold_stats['min_threshold'] = min(threshold_stats['min_threshold'], threshold_value)
-            threshold_stats['max_threshold'] = max(threshold_stats['max_threshold'], threshold_value)
-            threshold_stats['threshold_sum'] += threshold_value
-            threshold_stats['avg_threshold'] = threshold_stats['threshold_sum'] / frame_count
-            
-            # Detect line position
-            line_detected, cx, cy = calculate_line_position_enhanced(roi)
-            line_tracker.update_line_position(line_detected, cx)
-            
+            gray, binary, roi = process_image(frame)
+
+            line_detected, cx, cy = calculate_line_position(roi)
             if line_detected:
-                # Calculate error dan delta
-                raw_error = cx - 160  # Center setpoint
-                error = error_filter.filter_error(raw_error)
+                error = cx - 160
+                error = error_filter.filter_error(error)
                 delta_error = error - prev_error
                 prev_error = error
-                
-                # Classify movement type untuk statistics
-                if abs(error) < 20:
-                    performance_stats['straight_count'] += 1
-                else:
-                    performance_stats['turn_count'] += 1
-                
-                # Compute fuzzy control
-                kontrol = compute_enhanced_fuzzy_control(fuzzy_ctrl, error, delta_error)
-                
-                # Calculate adaptive PWM
-                pwm_kiri, pwm_kanan = calculate_adaptive_motor_pwm(kontrol, abs(error))
-                
-                # Send commands
+
+                kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
+                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
-                
-                # Debug output setiap 15 frames
-                if frame_count % 15 == 0:
-                    status = "TURN" if abs(error) > 20 else "STRAIGHT"
-                    print(f"[{status}] E:{error:3d} D:{delta_error:3d} FLC:{kontrol:5.1f} PWM:L{pwm_kiri}R{pwm_kanan} T:{threshold_value:.1f}")
-                    
+
+                if frame_count % 10 == 0:  # Monitoring lebih sering untuk analisis
+                    print(f"[DEBUG] Error: {error:4d}, Delta: {delta_error:4d}, FLC: {kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
+                    if abs(error) > 50:
+                        print(f"[WARN]  Error besar terdeteksi: {error}")  # Warning untuk error besar
             else:
-                # Line lost - recovery mode
-                recovery_error = line_tracker.get_recovery_error()
-                
-                if line_tracker.lost_line_counter < 5:
-                    # Quick recovery attempt
-                    recovery_pwm = 45 if recovery_error > 0 else 45
-                    pwm_kiri = recovery_pwm if recovery_error < 0 else 25
-                    pwm_kanan = 25 if recovery_error < 0 else recovery_pwm
-                    send_motor_commands(ser, pwm_kiri, pwm_kanan)
-                    
-                    if frame_count % 10 == 0:
-                        print(f"[RECOVERY] Searching line, last pos: {line_tracker.last_known_cx}, T:{threshold_value:.1f}")
-                else:
-                    # Stop after too many failed attempts
-                    send_motor_commands(ser, 0, 0)
-                    if frame_count % 20 == 0:
-                        print(f"[STOP] Line lost - robot stopped, T:{threshold_value:.1f}")
-            
-            # Visualization with enhanced info
-            frame_with_overlay = frame.copy()
-            cv2.line(frame_with_overlay, (160, 140), (160, 240), (0, 255, 0), 2)
-            
+                send_motor_commands(ser, 0, 0)
+                if frame_count % 20 == 0:
+                    print("[DEBUG] Garis tidak terdeteksi")
+
+            # Tampilkan tampilan real-time untuk analisis
+            frame_with_line = frame.copy()
+            cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
             if line_detected:
-                cv2.circle(frame_with_overlay, (cx, cy), 5, (0, 0, 255), -1)
-                # Error visualization
-                error_display = error_filter.last_filtered if hasattr(error_filter, 'last_filtered') else 0
-                cv2.putText(frame_with_overlay, f"E:{error_display}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                cv2.putText(frame_with_overlay, f"Mode:{'TURN' if abs(error_display) > 20 else 'STRAIGHT'}", 
-                           (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            
-            # Display Otsu threshold value on frame
-            cv2.putText(frame_with_overlay, f"Otsu T:{threshold_value:.1f}", (10, 80), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
-            
-            # Display frames
-            cv2.imshow("Enhanced Line Following (Otsu)", frame_with_overlay)
-            cv2.imshow("Binary ROI (Otsu)", roi)
-            cv2.imshow("Full Binary (Otsu)", binary)
-            
-            # Exit condition
+                cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1)
+                # Tambah indikator error
+                cv2.putText(frame_with_line, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            cv2.imshow("Camera View", frame_with_line)
+            cv2.imshow("Threshold ROI", roi)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-            
-            # Control loop timing
-            time.sleep(0.03)  # ~33 FPS untuk optimal performance
-            
+
+            frame_count += 1
+            time.sleep(0.03)  # Sedikit lebih cepat untuk responsivitas
     except KeyboardInterrupt:
-        print("\n[SYSTEM] Program dihentikan oleh user")
-    except Exception as e:
-        print(f"[ERROR] {e}")
+        print("\n[INFO] Dihentikan oleh pengguna")
     finally:
-        # Cleanup with enhanced statistics
-        print(f"[STATS] Straight: {performance_stats['straight_count']}, Turns: {performance_stats['turn_count']}")
-        print(f"[OTSU STATS] Min T:{threshold_stats['min_threshold']:.1f}, Max T:{threshold_stats['max_threshold']:.1f}, Avg T:{threshold_stats['avg_threshold']:.1f}")
         send_motor_commands(ser, 0, 0)
         if ser:
             ser.close()
         picam2.stop()
         cv2.destroyAllWindows()
-        print("[SYSTEM] Enhanced line following robot with Otsu thresholding shutdown complete")
+        print("[INFO] Program selesai")
 
 if __name__ == "__main__":
     main()
