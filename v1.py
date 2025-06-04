@@ -141,16 +141,15 @@ def setup_serial():
 def process_image(frame, display_mode=False):
     global manual_threshold_value 
 
-    # ROI dimulai lebih tinggi (melihat lebih jauh ke depan)
-    # DIUBAH: ROI disesuaikan untuk melihat lebih jauh ke depan.
-    # Nilai 120 (dari 0-240) artinya ROI dimulai sekitar tengah frame.
-    roi_start_y = 120 # DIUBAH: Dulu 160, sekarang 120
-    roi_end_y = 240 # Tetap sampai bawah frame
+    # Inisialisasi default untuk ROI
+    roi_start_y = 120 
+    roi_end_y = 240 
     
+    # Cek ukuran frame sebelum memproses
     if frame.shape[0] < roi_end_y:
-        print("[ERROR] Frame terlalu kecil untuk ROI yang ditentukan.")
-        # Mengembalikan 0 untuk roi_start_y jika frame tidak valid
-        return None, None, None, 0 
+        print("[ERROR] Frame terlalu kecil untuk ROI yang ditentukan. Menggunakan default ROI.")
+        # Mengembalikan nilai default untuk roi_start_y dan roi_end_y
+        return None, None, None, roi_start_y, roi_end_y 
         
     roi_color = frame[roi_start_y:roi_end_y, :] 
     
@@ -164,12 +163,12 @@ def process_image(frame, display_mode=False):
     binary_roi_clean = cv2.morphologyEx(binary_roi_clean, cv2.MORPH_OPEN, kernel, iterations=1) 
 
     if display_mode:
-        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Memastikan konversi dari frame berwarna
+        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) 
         blurred_full = cv2.GaussianBlur(gray_full, (5,5), 0)
         _, binary_full = cv2.threshold(blurred_full, manual_threshold_value, 255, cv2.THRESH_BINARY_INV)
-        return gray_full, binary_full, binary_roi_clean, roi_start_y 
+        return gray_full, binary_full, binary_roi_clean, roi_start_y, roi_end_y 
     else:
-        return None, None, binary_roi_clean, roi_start_y 
+        return None, None, binary_roi_clean, roi_start_y, roi_end_y 
 
 # --- Menghitung Posisi Garis ---
 def calculate_line_position(roi_binary, roi_start_y): 
@@ -192,9 +191,7 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
 
 # --- Menghitung Nilai PWM Motor ---
 def calculate_motor_pwm(kontrol, base_pwm=45, scaling_factor=0.08): 
-    # FLC Dead Zone: Jika kontrol sangat kecil, anggap robot harus lurus.
-    # Membantu stabilitas di garis lurus, mencegah zigzag kecil.
-    FLC_DEAD_ZONE = 10 # Ukuran dead zone (dalam nilai output FLC)
+    FLC_DEAD_ZONE = 10 
     
     if abs(kontrol) < FLC_DEAD_ZONE:
         kontrol_scaled = 0 
@@ -204,8 +201,8 @@ def calculate_motor_pwm(kontrol, base_pwm=45, scaling_factor=0.08):
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
 
-    MIN_PWM_OUTPUT = 35 # Sesuai input Anda
-    MAX_PWM_OUTPUT = 55 # Disesuaikan untuk rentang yang simetris
+    MIN_PWM_OUTPUT = 35 
+    MAX_PWM_OUTPUT = 55 
 
     pwm_kiri = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kiri))
     pwm_kanan = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kanan))
@@ -232,7 +229,7 @@ def main():
     picam2 = setup_camera()
     ser = setup_serial()
     error_filter = ErrorFilter(window_size=3) 
-    line_recovery_handler = LineRecovery() # Instansiasi LineRecovery
+    line_recovery_handler = LineRecovery() 
 
     prev_error = 0
     frame_count = 0
@@ -253,17 +250,51 @@ def main():
             if DISPLAY_GUI:
                 manual_threshold_value = cv2.getTrackbarPos("Threshold", "Threshold ROI")
 
-            # DIUBAH: Dapatkan roi_start_y dari process_image
-            gray_full, binary_full, roi_binary, roi_start_y = process_image(frame, display_mode=DISPLAY_GUI)
+            # DIUBAH: Dapatkan roi_start_y dan roi_end_y dari process_image
+            gray_full, binary_full, roi_binary, roi_start_y, roi_end_y = process_image(frame, display_mode=DISPLAY_GUI)
             
             if roi_binary is None:
-                # Menangani kasus ROI tidak valid (misalnya, frame error dari kamera)
-                send_motor_commands(ser, 0, 0)
-                if frame_count % 30 == 0:
-                    print("[DEBUG] Gagal memproses frame: ROI tidak valid. Robot berhenti.")
-                frame_count += 1
-                continue
+                # Menggunakan default roi_start_y/end_y untuk visualisasi jika frame error
+                # Ini akan membuat visualisasi tetap muncul, meskipun datanya mungkin tidak akurat
+                # untuk frame saat ini karena gambar error.
+                roi_start_y_display = 120 # Default untuk visualisasi
+                roi_end_y_display = 240   # Default untuk visualisasi
 
+                recovery_action = line_recovery_handler.handle_line_lost(ser)
+                prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan
+                if frame_count % 30 == 0:
+                    print(f"[DEBUG] Gagal memproses frame: ROI tidak valid. Aksi pemulihan: {recovery_action}")
+                frame_count += 1
+                
+                # Menampilkan visualisasi dengan default ROI jika frame error
+                if DISPLAY_GUI:
+                    frame_for_display = frame.copy()
+                    cv2.line(frame_for_display, (width // 2, 0), (width // 2, height), (0, 255, 0), 2)
+                    cv2.rectangle(frame_for_display, (0, roi_start_y_display), (width, roi_end_y_display), (255, 0, 0), 2)
+                    flc_error_z_boundary = 15
+                    cv2.line(frame_for_display, (width // 2 - flc_error_z_boundary, roi_start_y_display), (width // 2 - flc_error_z_boundary, roi_end_y_display), (0, 255, 255), 1)
+                    cv2.line(frame_for_display, (width // 2 + flc_error_z_boundary, roi_start_y_display), (width // 2 + flc_error_z_boundary, roi_end_y_display), (0, 255, 255), 1)
+                    
+                    cv2.putText(frame_for_display, f"LOST: {line_recovery_handler.lost_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    current_recovery_action = "STOP_SEARCH" if line_recovery_handler.lost_count < 10 else ("SEARCH_RIGHT_SPIN" if line_recovery_handler.last_valid_error_direction > 0 else "SEARCH_LEFT_SPIN")
+                    cv2.putText(frame_for_display, f"ACTION: {current_recovery_action}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    cv2.putText(frame_for_display, f"Thresh: {manual_threshold_value}", (10, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+                    cv2.imshow("Camera View", frame_for_display)
+                    # Tidak menampilkan Threshold ROI jika binary_full juga None
+                    if binary_full is not None:
+                        cv2.imshow("Threshold ROI", binary_full)
+                    else:
+                        try:
+                            # Jika binary_full None, coba tampilkan dummy agar jendela tidak kosong
+                            cv2.imshow("Threshold ROI", np.zeros((roi_end_y_display - roi_start_y_display, width), dtype=np.uint8))
+                        except Exception as e:
+                            print(f"[VISUALIZATION ERROR] Could not display dummy ROI: {e}")
+
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                continue # Langsung ke iterasi berikutnya
+            
             # DIUBAH: Kirim roi_start_y ke calculate_line_position
             line_detected, cx, cy = calculate_line_position(roi_binary, roi_start_y)
             
@@ -282,7 +313,6 @@ def main():
                 if frame_count % 10 == 0:
                     print(f"[DEBUG] Err:{error:4d}, ΔErr:{delta_error:3d}, FLC:{kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
             else:
-                # DIUBAH: Panggil LineRecovery saat garis tidak terdeteksi
                 recovery_action = line_recovery_handler.handle_line_lost(ser)
                 prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan
                 if frame_count % 20 == 0:
@@ -308,7 +338,6 @@ def main():
                     cv2.putText(frame_for_display, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 else: # Tampilkan status pemulihan jika garis hilang
                     cv2.putText(frame_for_display, f"LOST: {line_recovery_handler.lost_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    # Menampilkan aksi pemulihan saat ini tanpa memanggil handle_line_lost lagi
                     current_recovery_action = "STOP_SEARCH" if line_recovery_handler.lost_count < 10 else ("SEARCH_RIGHT_SPIN" if line_recovery_handler.last_valid_error_direction > 0 else "SEARCH_LEFT_SPIN")
                     cv2.putText(frame_for_display, f"ACTION: {current_recovery_action}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
@@ -316,7 +345,7 @@ def main():
                 cv2.putText(frame_for_display, f"Thresh: {manual_threshold_value}", (10, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
                 cv2.imshow("Camera View", frame_for_display)
-                cv2.imshow("Threshold ROI", roi_binary)
+                cv2.imshow("Threshold ROI", roi_binary) # Ini seharusnya selalu valid sekarang
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             # --- Akhir Bagian Tampilan ---
