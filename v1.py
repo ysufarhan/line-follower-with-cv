@@ -129,7 +129,7 @@ def setup_camera():
 # --- Setup Komunikasi Serial ---
 def setup_serial():
     try:
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=0.1) 
+        ser = serial.Serial('/dev/serial0', 115200, timeout=0.1) 
         print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
