@@ -223,5 +223,51 @@ def main():
         while True:
             frame = picam2.capture_array()
             height, width = frame
-::contentReference[oaicite:4]{index=4}
- 
+            height, width = frame.shape[:2]
+
+            gray, binary, roi, roi_start = process_image(frame)
+
+            found, cx, cy, contour = calculate_line_position(roi, roi_start, width)
+
+            if found:
+                error = cx - (width // 2)
+                filtered_error = error_filter.filter_error(error)
+                delta_error = filtered_error - prev_error
+                kontrol = compute_fuzzy_control(fuzzy_ctrl, filtered_error, delta_error)
+                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
+
+                send_motor_commands(ser, pwm_kiri, pwm_kanan)
+
+                line_recovery.line_found(error)
+                prev_error = filtered_error
+
+                # Optional: Debugging visuals
+                cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+                cv2.drawContours(frame, [contour + [int(width*0.1), roi_start]], -1, (255, 0, 0), 2)
+            else:
+                action = line_recovery.handle_line_lost(ser)
+                print(f"[WARNING] Line lost. Taking action: {action}")
+
+            # Optional: display windows for debugging
+            # cv2.imshow("Frame", frame)
+            # cv2.imshow("Binary", binary)
+            # cv2.imshow("ROI", roi)
+
+            frame_count += 1
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        print("[EXIT] Dihentikan oleh pengguna.")
+
+    finally:
+        send_motor_commands(ser, 0, 0)
+        if ser:
+            ser.close()
+        picam2.stop()
+        cv2.destroyAllWindows()
+        print("[CLEANUP] Program selesai dan resources dibersihkan.")
+
+if __name__ == "__main__":
+    main()
+
