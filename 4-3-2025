@@ -10,117 +10,84 @@ class ErrorFilter:
     def __init__(self, window_size=3):
         self.window_size = window_size
         self.error_history = []
-        self.alpha = 0.7
+        self.alpha = 0.8  # Coba tingkatkan smoothing alpha
+        # Atau bisa coba window_size=2 jika masih terasa lambat
 
     def filter_error(self, error):
         self.error_history.append(error)
         if len(self.error_history) > self.window_size:
             self.error_history.pop(0)
-        avg_error = sum(self.error_history) / len(self.error_history)
-        if len(self.error_history) > 1:
-            prev_avg = sum(self.error_history[:-1]) / len(self.error_history[:-1])
-            smoothed_error = self.alpha * avg_error + (1 - self.alpha) * prev_avg
+        
+        # Menggunakan Exponential Moving Average (EMA) untuk smoothing yang lebih baik
+        if len(self.error_history) == 1:
+            smoothed_error = self.error_history[0]
         else:
-            smoothed_error = avg_error
+            # Current average calculation
+            current_avg = sum(self.error_history) / len(self.error_history)
+            # Previous smoothed value (from the history)
+            prev_smoothed = self.error_history[-2] if len(self.error_history) > 1 else current_avg # Fallback if only one item
+            
+            # Simple EMA using current average and previous smoothed value
+            smoothed_error = self.alpha * current_avg + (1 - self.alpha) * prev_smoothed
+            
         return int(smoothed_error)
 
 def setup_fuzzy_logic():
-    # Antecedent dan Consequent
     error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
     output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
 
-    # IMPROVED ERROR MEMBERSHIP FUNCTIONS - Lebih sensitif di area tengah
-    error['NL'] = fuzz.trimf(error.universe, [-200, -120, -40])  # Negative Large
-    error['NM'] = fuzz.trimf(error.universe, [-60, -25, -8])    # Negative Medium  
-    error['NS'] = fuzz.trimf(error.universe, [-15, -5, 0])      # Negative Small
-    error['Z']  = fuzz.trimf(error.universe, [-3, 0, 3])        # Zero (lebih sempit)
-    error['PS'] = fuzz.trimf(error.universe, [0, 5, 15])        # Positive Small
-    error['PM'] = fuzz.trimf(error.universe, [8, 25, 60])       # Positive Medium
-    error['PL'] = fuzz.trimf(error.universe, [40, 120, 200])    # Positive Large
+    # New Error Membership Functions
+    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -70])
+    error['NS'] = fuzz.trimf(error.universe, [-80, -30, -10])
+    error['Z']  = fuzz.trimf(error.universe, [-10, 0, 10])
+    error['PS'] = fuzz.trimf(error.universe, [10, 30, 80])
+    error['PL'] = fuzz.trimf(error.universe, [70, 150, 200])
 
-    # IMPROVED DELTA MEMBERSHIP FUNCTIONS - Lebih responsif terhadap perubahan
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -60, -20])  # Negative Large
-    delta['NM'] = fuzz.trimf(delta.universe, [-35, -15, -5])    # Negative Medium
-    delta['NS'] = fuzz.trimf(delta.universe, [-10, -3, 0])      # Negative Small
-    delta['Z']  = fuzz.trimf(delta.universe, [-2, 0, 2])        # Zero (lebih sempit)
-    delta['PS'] = fuzz.trimf(delta.universe, [0, 3, 10])        # Positive Small
-    delta['PM'] = fuzz.trimf(delta.universe, [5, 15, 35])       # Positive Medium
-    delta['PL'] = fuzz.trimf(delta.universe, [20, 60, 150])     # Positive Large
+    # New Delta Error Membership Functions
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-60, -25, -5])
+    delta['Z']  = fuzz.trimf(delta.universe, [-8, 0, 8])
+    delta['PS'] = fuzz.trimf(delta.universe, [5, 25, 60])
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 80, 150])
 
-    # IMPROVED OUTPUT MEMBERSHIP FUNCTIONS - Kontrol yang lebih halus
-    output['LL'] = fuzz.gaussmf(output.universe, -120, 15)      # Left Large
-    output['LM'] = fuzz.gaussmf(output.universe, -60, 10)       # Left Medium
-    output['LS'] = fuzz.gaussmf(output.universe, -20, 6)        # Left Small
-    output['Z']  = fuzz.gaussmf(output.universe, 0, 4)          # Zero (lebih sempit)
-    output['RS'] = fuzz.gaussmf(output.universe, 20, 6)         # Right Small
-    output['RM'] = fuzz.gaussmf(output.universe, 60, 10)        # Right Medium
-    output['RL'] = fuzz.gaussmf(output.universe, 120, 15)       # Right Large
+    # New Output Membership Functions
+    output['L']  = fuzz.trimf(output.universe, [-150, -100, -70])
+    output['LS'] = fuzz.trimf(output.universe, [-80, -40, -10])
+    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])
+    output['RS'] = fuzz.trimf(output.universe, [10, 40, 80])
+    output['R']  = fuzz.trimf(output.universe, [70, 100, 150])
 
-    # IMPROVED FUZZY RULES - Lebih detail dan presisi
     rules = [
-        # Error NL (Negative Large) - Robot jauh ke kiri dari garis
-        ctrl.Rule(error['NL'] & delta['NL'], output['LL']),
-        ctrl.Rule(error['NL'] & delta['NM'], output['LL']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['LM']),
-        ctrl.Rule(error['NL'] & delta['Z'], output['LM']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PM'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
+        ctrl.Rule(error['NL'] & delta['NL'], output['L']),
+        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
+        ctrl.Rule(error['NL'] & delta['PS'], output['Z']), # Mungkin perlu output LS
+        ctrl.Rule(error['NL'] & delta['PL'], output['Z']), # Mungkin perlu output Z atau RS
 
-        # Error NM (Negative Medium)
-        ctrl.Rule(error['NM'] & delta['NL'], output['LL']),
-        ctrl.Rule(error['NM'] & delta['NM'], output['LM']),
-        ctrl.Rule(error['NM'] & delta['NS'], output['LM']),
-        ctrl.Rule(error['NM'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NM'] & delta['PS'], output['LS']),
-        ctrl.Rule(error['NM'] & delta['PM'], output['Z']),
-        ctrl.Rule(error['NM'] & delta['PL'], output['Z']),
-
-        # Error NS (Negative Small) - Robot sedikit ke kiri
-        ctrl.Rule(error['NS'] & delta['NL'], output['LM']),
-        ctrl.Rule(error['NS'] & delta['NM'], output['LS']),
+        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['NS'] & delta['NS'], output['LS']),
-        ctrl.Rule(error['NS'] & delta['Z'], output['LS']),
+        ctrl.Rule(error['NS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PM'], output['Z']),
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        # Error Z (Zero) - Robot tepat di tengah garis
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['Z'] & delta['NM'], output['LS']),
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PM'], output['RS']),
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
-        # Error PS (Positive Small) - Robot sedikit ke kanan
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['PS'] & delta['NM'], output['Z']),
         ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PS'] & delta['Z'], output['RS']),
+        ctrl.Rule(error['PS'] & delta['Z'], output['Z']),
         ctrl.Rule(error['PS'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PM'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PL'], output['RM']),
+        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
 
-        # Error PM (Positive Medium)
-        ctrl.Rule(error['PM'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PM'] & delta['NM'], output['Z']),
-        ctrl.Rule(error['PM'] & delta['NS'], output['RS']),
-        ctrl.Rule(error['PM'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PM'] & delta['PS'], output['RM']),
-        ctrl.Rule(error['PM'] & delta['PM'], output['RM']),
-        ctrl.Rule(error['PM'] & delta['PL'], output['RL']),
-
-        # Error PL (Positive Large) - Robot jauh ke kanan dari garis
-        ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NM'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['Z'], output['RM']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RM']),
-        ctrl.Rule(error['PL'] & delta['PM'], output['RL']),
-        ctrl.Rule(error['PL'] & delta['PL'], output['RL']),
+        ctrl.Rule(error['PL'] & delta['NL'], output['Z']), # Mungkin perlu output RS
+        ctrl.Rule(error['PL'] & delta['NS'], output['Z']), # Mungkin perlu output RS
+        ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['PL'], output['R']),
     ]
 
     control_system = ctrl.ControlSystem(rules)
