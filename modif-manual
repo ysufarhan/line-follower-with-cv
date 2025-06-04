@@ -1,0 +1,426 @@
+from picamera2 import Picamera2
+import cv2
+import numpy as np
+import time
+import serial
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+# import matplotlib.pyplot as plt # Uncomment if you want to visualize FLC membership functions
+
+# --- Konfigurasi Global ---
+# Sesuaikan port serial jika diperlukan. Umumnya '/dev/ttyS0' untuk RPi 4.
+# Pastikan sudah diaktifkan di raspi-config (Interface Options -> P6 Serial Port -> No for login shell, Yes for hardware serial)
+SERIAL_PORT = '/dev/ttyS0'  
+BAUD_RATE = 115200
+
+# Kecepatan dasar robot saat lurus dan scaling factor untuk belokan
+# Nilai dikurangi agar PWM tidak terlalu cepat
+BASE_PWM = 35 # DIUBAH: Dikurangi. Kecepatan maju dasar (0-100), eksperimen: 30-45
+SCALING_FACTOR = 0.06 # DIUBAH: Dikurangi. Mengatur seberapa kuat FLC mempengaruhi belokan (eksperimen: 0.05 - 0.10)
+
+# Batasan PWM untuk motor agar aman dan efektif (0-100)
+MIN_PWM_OUTPUT = 20 # DIUBAH: Dikurangi
+MAX_PWM_OUTPUT = 55 # DIUBAH: Dikurangi
+
+# Ukuran Dead Zone FLC: dalam piksel. Error di bawah nilai ini dianggap nol.
+# Membantu stabilitas di garis lurus, nilai sedikit diperbesar
+FLC_DEAD_ZONE_ERROR = 20 # DIUBAH: Diperbesar sedikit. Eksperimen: 10-30
+
+# --- Kelas untuk Filter Error ---
+class ErrorFilter:
+    def __init__(self, window_size=5, alpha=0.5): # DIUBAH: window_size & alpha untuk smoothing lebih
+        self.window_size = window_size
+        self.error_history = []
+        self.alpha = alpha
+        self.last_smoothed_error = 0 # Menyimpan hasil smoothing sebelumnya
+
+    def filter_error(self, error):
+        self.error_history.append(error)
+        if len(self.error_history) > self.window_size:
+            self.error_history.pop(0)
+            
+        # Median filter: Mengambil nilai tengah dari data history untuk mengurangi noise
+        sorted_errors = sorted(self.error_history)
+        median_error = sorted_errors[len(sorted_errors)//2]
+        
+        # Exponential smoothing: Menghaluskan transisi
+        if len(self.error_history) > 1:
+            smoothed_error = self.alpha * median_error + (1 - self.alpha) * self.last_smoothed_error
+        else:
+            smoothed_error = median_error
+        
+        self.last_smoothed_error = smoothed_error # Simpan untuk iterasi berikutnya
+        return int(smoothed_error)
+
+# --- Kelas untuk Pemulihan Garis ---
+class LineRecovery:
+    def __init__(self):
+        self.lost_count = 0 # Menghitung berapa frame garis hilang
+        self.last_valid_error = 0 # Error terakhir saat garis masih terdeteksi
+        self.recovery_speed = 35 # Kecepatan PWM saat mencari garis (DIUBAH: Dikurangi)
+        self.reverse_speed = 25 # Kecepatan mundur (DIUBAH: Dikurangi)
+
+    def handle_line_lost(self, ser_instance):
+        self.lost_count += 1
+        
+        # Tahap 1: Diam sebentar
+        if self.lost_count < 15: # DIUBAH: Durasi diam sedikit lebih lama
+            send_motor_commands(ser_instance, 0, 0)
+            return "STOP"
+        # Tahap 2: Mundur sedikit
+        elif self.lost_count < 40: # DIUBAH: Durasi mundur sedikit lebih lama
+            send_motor_commands(ser_instance, -self.reverse_speed, -self.reverse_speed) # Mundur
+            return "REVERSE"
+        # Tahap 3: Berputar mencari garis
+        else:
+            # Berputar ke arah terakhir garis terdeteksi (putar di tempat)
+            if self.last_valid_error > 0: # Garis terakhir di kanan, putar ke kanan (motor kiri maju, kanan mundur)
+                send_motor_commands(ser_instance, self.recovery_speed, -self.recovery_speed)
+                return "SEARCH_RIGHT"
+            else: # Garis terakhir di kiri, putar ke kiri (motor kiri mundur, kanan maju)
+                send_motor_commands(ser_instance, -self.recovery_speed, self.recovery_speed)
+                return "SEARCH_LEFT"
+        
+    def line_found(self, current_error):
+        self.lost_count = 0
+        self.last_valid_error = current_error # Simpan error terakhir yang valid
+
+# --- Setup Fuzzy Logic Control (FLC) ---
+def setup_fuzzy_logic():
+    # Antecedents (Input variables)
+    error = ctrl.Antecedent(np.arange(-350, 351, 1), 'error')
+    delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
+
+    # Consequent (Output variable)
+    output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
+
+    # Membership Functions (DIUBAH: Penyesuaian untuk respons lebih halus dan stabil)
+    # Error:
+    error['NL'] = fuzz.trimf(error.universe, [-350, -200, -80]) # DIUBAH: Range NL sedikit dilebarkan
+    error['NS'] = fuzz.trimf(error.universe, [-100, -35, -15]) # DIUBAH: Range NS sedikit dilebarkan
+    error['Z']  = fuzz.trimf(error.universe, [-25, 0, 25])     # DIUBAH: Range Z DIBENARKAN (dilebarkan) untuk stabilitas lurus
+    error['PS'] = fuzz.trimf(error.universe, [15, 35, 100])    # DIUBAH: Range PS sedikit dilebarkan
+    error['PL'] = fuzz.trimf(error.universe, [80, 200, 350])   # DIUBAH: Range PL sedikit dilebarkan
+
+    # Delta Error:
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -90, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-50, -20, -5])   # DIUBAH: Range NS sedikit dilebarkan
+    delta['Z']  = fuzz.trimf(delta.universe, [-8, 0, 8])       # DIUBAH: Range Z DIBENARKAN (dilebarkan) untuk mengurangi sensitivitas noise
+    delta['PS'] = fuzz.trimf(delta.universe, [5, 20, 50])      # DIUBAH: Range PS sedikit dilebarkan
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 90, 150])
+
+    # Output:
+    output['L']  = fuzz.trimf(output.universe, [-100, -70, -30]) # DIUBAH: Lebih banyak ruang untuk respons sedang
+    output['LS'] = fuzz.trimf(output.universe, [-40, -15, -5])  # DIUBAH: Lebih banyak ruang untuk respons kecil
+    output['Z']  = fuzz.trimf(output.universe, [-3, 0, 3])      # DIUBAH: Z SANGAT SEMPIT untuk lurus sempurna
+    output['RS'] = fuzz.trimf(output.universe, [5, 15, 40])     # DIUBAH: Lebih banyak ruang untuk respons kecil
+    output['R']  = fuzz.trimf(output.universe, [30, 70, 100])   # DIUBAH: Lebih banyak ruang untuk respons sedang
+
+    # Rule Base (Disempurnakan untuk belokan mulus dan stabilitas)
+    rules = [
+        # Error Negative Large (Garis di kiri jauh dari pusat) -> Belok Kanan Kuat
+        ctrl.Rule(error['NL'] & delta['NL'], output['L']), # Jauh kiri, makin jauh kiri -> L (koreksi agresif)
+        ctrl.Rule(error['NL'] & delta['NS'], output['L']), # Jauh kiri, sedikit menjauh -> L
+        ctrl.Rule(error['NL'] & delta['Z'],  output['LS']),# Jauh kiri, stabil -> LS (koreksi sedang)
+        ctrl.Rule(error['NL'] & delta['PS'], output['Z']), # Jauh kiri, mendekat ke tengah -> Z (hindari overshooting)
+        ctrl.Rule(error['NL'] & delta['PL'], output['Z']), # Jauh kiri, cepat mendekat -> Z
+
+        # Error Negative Small (Garis di kiri sedikit dari pusat) -> Belok Kanan Ringan
+        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),# Agak kiri, menjauh cepat -> LS
+        ctrl.Rule(error['NS'] & delta['NS'], output['Z']), # Agak kiri, menjauh -> Z (mulai luruskan)
+        ctrl.Rule(error['NS'] & delta['Z'],  output['Z']), # Agak kiri, stabil -> Z (TARGET LURUS)
+        ctrl.Rule(error['NS'] & delta['PS'], output['RS']),# Agak kiri, mendekat -> RS (koreksi ringan)
+        ctrl.Rule(error['NS'] & delta['PL'], output['RS']),# Agak kiri, cepat mendekat -> RS
+
+        # Error Zero (Garis di tengah) -> Prioritas Utama: Lurus
+        # Ini adalah kombinasi paling penting untuk menjaga stabilitas lurus
+        ctrl.Rule(error['Z'] & delta['NL'], output['LS']), # Di tengah, tapi menjauh ke kiri -> LS (koreksi halus)
+        ctrl.Rule(error['Z'] & delta['NS'], output['Z']),  # Di tengah, menjauh sedikit ke kiri -> Z
+        ctrl.Rule(error['Z'] & delta['Z'],  output['Z']),  # Sempurna di tengah, stabil -> Z (Ideal!)
+        ctrl.Rule(error['Z'] & delta['PS'], output['Z']),  # Di tengah, menjauh sedikit ke kanan -> Z
+        ctrl.Rule(error['Z'] & delta['PL'], output['RS']), # Di tengah, tapi menjauh ke kanan -> RS (koreksi halus)
+
+        # Error Positive Small (Garis di kanan sedikit dari pusat) -> Belok Kiri Ringan
+        ctrl.Rule(error['PS'] & delta['NL'], output['LS']),# Agak kanan, cepat mendekat -> LS
+        ctrl.Rule(error['PS'] & delta['NS'], output['RS']),# Agak kanan, mendekat -> RS (koreksi ringan)
+        ctrl.Rule(error['PS'] & delta['Z'],  output['Z']), # Agak kanan, stabil -> Z (TARGET LURUS)
+        ctrl.Rule(error['PS'] & delta['PS'], output['Z']), # Agak kanan, menjauh -> Z (mulai luruskan)
+        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),# Agak kanan, menjauh cepat -> RS
+
+        # Error Positive Large (Garis di kanan jauh dari pusat) -> Belok Kiri Kuat
+        ctrl.Rule(error['PL'] & delta['NL'], output['Z']), # Jauh kanan, cepat mendekat -> Z (hindari overshooting)
+        ctrl.Rule(error['PL'] & delta['NS'], output['Z']), # Jauh kanan, mendekat -> Z
+        ctrl.Rule(error['PL'] & delta['Z'],  output['RS']),# Jauh kanan, stabil -> RS (koreksi sedang)
+        ctrl.Rule(error['PL'] & delta['PS'], output['R']), # Jauh kanan, menjauh -> R
+        ctrl.Rule(error['PL'] & delta['PL'], output['R']), # Jauh kanan, makin jauh kanan -> R (koreksi agresif)
+    ]
+
+    control_system = ctrl.ControlSystem(rules)
+    return ctrl.ControlSystemSimulation(control_system)
+
+# --- Setup Kamera Raspberry Pi ---
+def setup_camera():
+    picam2 = Picamera2()
+    # Resolusi default 640x480. Ini adalah trade-off antara detail dan performa.
+    # Jika Pi 4 masih kewalahan, bisa turunkan ke (320, 240)
+    config = picam2.create_still_configuration(main={"size": (640, 480)}) 
+    picam2.configure(config)
+    picam2.start()
+    
+    # Beri waktu kamera untuk auto-exposure dan auto-gain.
+    # Jika perlu, Anda bisa mengatur ini secara manual.
+    # picam2.set_controls({"ExposureTime": 8000, "AnalogueGain": 1.0})
+    time.sleep(1) # Tunggu sebentar agar kamera stabil
+    return picam2
+
+# --- Setup Komunikasi Serial ---
+def setup_serial():
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1) # Timeout lebih pendek untuk responsif
+        print(f"[UART] Port serial {SERIAL_PORT} berhasil dibuka.")
+        return ser
+    except serial.SerialException as e:
+        print(f"[UART ERROR] Gagal membuka serial port {SERIAL_PORT}: {e}")
+        print("Pastikan ESP32 terhubung, port serial benar, dan tidak ada program lain yang menggunakannya.")
+        print("Coba cek: 'ls /dev/tty*' dan 'sudo raspi-config' -> Interface Options -> P6 Serial Port.")
+        return None
+    except Exception as e:
+        print(f"[GENERAL ERROR] Gagal membuka serial port: {e}")
+        return None
+
+# --- Pemrosesan Citra Menggunakan OpenCV ---
+def process_image(frame):
+    # Konversi ke grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Adaptive histogram equalization (CLAHE) untuk meningkatkan kontras di area lokal
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+    
+    # Multiple blur untuk mengurangi noise dan menghaluskan gambar
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    blurred = cv2.medianBlur(blurred, 5)
+    
+    # OTSU Thresholding: Secara otomatis menentukan nilai ambang biner yang optimal
+    # Ini sangat direkomendasikan karena adaptif terhadap perubahan pencahayaan.
+    # THRESH_BINARY_INV: Invers biner (objek gelap menjadi putih, latar terang menjadi hitam)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    height, width = binary.shape
+    
+    # Region of Interest (ROI) - Fokus pada area yang paling relevan
+    # Disesuaikan untuk 640x480:
+    roi_start = int(height * 0.40)  # DIUBAH: Mulai dari 40% dari atas (melihat lebih dekat)
+    roi_end = int(height * 0.95)    # Berakhir di 95% dari tinggi frame (hampir bawah)
+    roi_left = int(width * 0.05)    # Margin 5% dari kiri
+    roi_right = int(width * 0.95)   # Margin 5% dari kanan
+    
+    # Pastikan ROI tidak keluar dari batas gambar
+    roi_start = max(0, min(roi_start, height - 1))
+    roi_end = max(0, min(roi_end, height))
+    roi_left = max(0, min(roi_left, width - 1))
+    roi_right = max(0, min(roi_right, width))
+
+    roi = binary[roi_start:roi_end, roi_left:roi_right]
+    
+    return gray, binary, roi, roi_start, roi_left, roi_end, roi_right
+
+# --- Menghitung Posisi Garis ---
+def calculate_line_position(roi_image, roi_start_y, roi_start_x, frame_width):
+    # Operasi morfologi untuk membersihkan ROI
+    kernel = np.ones((5,5), np.uint8) 
+    roi_clean = cv2.morphologyEx(roi_image, cv2.MORPH_CLOSE, kernel)
+    roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
+    
+    # Mencari kontur objek putih (garis)
+    contours, _ = cv2.findContours(roi_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Threshold area minimum untuk memastikan kontur yang terdeteksi benar-benar garis
+        # DIUBAH: Disesuaikan. Jika garis 17mm, mungkin perlu 300-600 untuk 640x480.
+        if cv2.contourArea(largest_contour) > 400: # Coba 400
+            M = cv2.moments(largest_contour)
+            if M['m00'] > 0:
+                cx = int(M['m10'] / M['m00']) + roi_start_x
+                cy = int(M['m01'] / M['m00']) + roi_start_y
+                return True, cx, cy, largest_contour
+    
+    return False, 0, 0, None
+
+# --- Menghitung Output Kontrol Fuzzy ---
+def compute_fuzzy_control(fuzzy_ctrl_system, error_value, delta_error_value):
+    try:
+        fuzzy_ctrl_system.input['error'] = np.clip(error_value, -350, 350)
+        fuzzy_ctrl_system.input['delta'] = np.clip(delta_error_value, -150, 150)
+        fuzzy_ctrl_system.compute()
+        return np.clip(fuzzy_ctrl_system.output['output'], -100, 100)
+    except Exception as e:
+        # print(f"[FLC ERROR] {e}. Input Error: {error_value}, Delta Error: {delta_error_value}")
+        return 0.0
+
+# --- Menghitung Nilai PWM Motor ---
+def calculate_motor_pwm(control_output, base_pwm, scaling_factor):
+    # Menerapkan dead zone untuk stabilitas di garis lurus
+    # Jika output kontrol sangat kecil, anggap robot harus lurus.
+    if abs(control_output) < FLC_DEAD_ZONE_ERROR: 
+        control_scaled = 0 # Tidak ada koreksi, PWM kiri = kanan
+    else:
+        # PENTING: Untuk memastikan PWM saling melengkapi saat belok.
+        # Jika control_output positif (garis di kanan, belok kiri), pwm_kiri akan > pwm_kanan.
+        # Jika control_output negatif (garis di kiri, belok kanan), pwm_kiri akan < pwm_kanan.
+        control_scaled = control_output * scaling_factor
+
+    pwm_kiri = base_pwm + control_scaled
+    pwm_kanan = base_pwm - control_scaled
+
+    # Membatasi nilai PWM
+    pwm_kiri = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kiri))
+    pwm_kanan = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kanan))
+
+    return int(pwm_kiri), int(pwm_kanan)
+
+# --- Mengirim Perintah Motor Melalui Serial ---
+def send_motor_commands(ser_instance, pwm_kiri, pwm_kanan):
+    if ser_instance and ser_instance.is_open:
+        try:
+            cmd = f"{pwm_kiri},{pwm_kanan}\n"
+            ser_instance.write(cmd.encode())
+            ser_instance.flush()
+        except serial.SerialException as e:
+            print(f"[SERIAL SEND ERROR] Gagal mengirim data: {e}")
+        except Exception as e:
+            print(f"[SERIAL SEND ERROR] Error tidak dikenal saat mengirim: {e}")
+    # elif not ser_instance:
+    #     pass # Biarkan ini kosong jika tidak ingin spam di konsol
+
+# --- Fungsi Utama Program ---
+def main():
+    fuzzy_controller = setup_fuzzy_logic()
+    camera = setup_camera()
+    serial_port = setup_serial()
+    error_filter = ErrorFilter() # Filter error
+    line_recovery_handler = LineRecovery() # Handler pemulihan garis
+
+    prev_filtered_error = 0 # Error dari frame sebelumnya (setelah difilter)
+    frame_counter = 0
+    
+    print("[INFO] Memulai robot Line Follower...")
+    print("[INFO] Menunggu kamera stabil...")
+    time.sleep(2) # Beri waktu kamera untuk auto-exposure
+
+    try:
+        while True:
+            # Ambil frame dari kamera
+            frame = camera.capture_array()
+            height, width = frame.shape[:2]
+            center_x = width // 2 # Titik tengah horizontal frame
+
+            # Proses gambar (grayscale, blur, thresholding, ROI)
+            gray_frame, binary_frame, roi_frame, roi_y_start, roi_x_start, roi_y_end, roi_x_end = process_image(frame)
+            
+            # Hitung posisi garis di dalam ROI
+            line_found, line_cx, line_cy, line_contour = calculate_line_position(roi_frame, roi_y_start, roi_x_start, width)
+
+            current_pwm_kiri = 0
+            current_pwm_kanan = 0
+
+            if line_found:
+                line_recovery_handler.line_found(line_cx - center_x) # Reset recovery state
+                
+                # Hitung error (penyimpangan dari pusat)
+                current_error = line_cx - center_x
+                
+                # Filter error untuk menghaluskan dan mengurangi noise
+                filtered_error = error_filter.filter_error(current_error)
+                
+                # Hitung delta error (perubahan error antar frame)
+                delta_error = filtered_error - prev_filtered_error
+                prev_filtered_error = filtered_error # Update error sebelumnya untuk frame berikutnya
+
+                # Hitung output kontrol dari FLC
+                control_output = compute_fuzzy_control(fuzzy_controller, filtered_error, delta_error)
+                
+                # Hitung PWM motor berdasarkan output FLC
+                current_pwm_kiri, current_pwm_kanan = calculate_motor_pwm(control_output, BASE_PWM, SCALING_FACTOR)
+                
+                # Kirim perintah PWM ke ESP32
+                send_motor_commands(serial_port, current_pwm_kiri, current_pwm_kanan)
+
+                # Output debug ke konsol setiap 10 frame
+                if frame_counter % 10 == 0:
+                    status_text = "LURUS" if abs(filtered_error) < FLC_DEAD_ZONE_ERROR else "BELOK"
+                    print(f"[{status_text}] Err:{filtered_error:3d}, ΔErr:{delta_error:3d}, FLC:{control_output:5.1f}, PWM: L{current_pwm_kiri} R{current_pwm_kanan}")
+                    
+            else: # Garis tidak terdeteksi
+                # Tangani situasi garis hilang
+                recovery_action = line_recovery_handler.handle_line_lost(serial_port)
+                # Saat garis hilang, reset prev_filtered_error untuk menghindari lonjakan besar saat garis ditemukan lagi
+                prev_filtered_error = 0 
+                if frame_counter % 15 == 0:
+                    print(f"[HILANG] Garis hilang, aksi: {recovery_action}, lost_count: {line_recovery_handler.lost_count}")
+            
+            # --- Visualisasi (untuk debugging dan monitoring) ---
+            frame_display = frame.copy()
+            
+            # Gambar garis tengah frame (hijau)
+            cv2.line(frame_display, (center_x, 0), (center_x, height), (0, 255, 0), 2)
+            
+            # Gambar kotak ROI (cyan)
+            roi_color = (255, 255, 0) # Cyan
+            cv2.rectangle(frame_display, 
+                            (roi_x_start, roi_y_start), 
+                            (roi_x_end, roi_y_end), 
+                            roi_color, 2)
+            
+            if line_found:
+                # Gambar lingkaran di pusat garis yang terdeteksi (merah)
+                cv2.circle(frame_display, (line_cx, line_cy), 8, (0, 0, 255), -1)
+                
+                # Gambar kontur garis (magenta) - Ini yang Anda sebut "garis ungu"
+                if line_contour is not None:
+                    # Sesuaikan koordinat kontur dari ROI ke frame asli
+                    adjusted_contour = line_contour.copy()
+                    adjusted_contour[:, :, 0] += roi_x_start
+                    adjusted_contour[:, :, 1] += roi_y_start
+                    cv2.drawContours(frame_display, [adjusted_contour], -1, (255, 0, 255), 2)
+                
+                # Tampilkan teks informasi error dan status
+                cv2.putText(frame_display, f"Error: {current_error}", 
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(frame_display, f"Filtered Err: {filtered_error}", 
+                                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                cv2.putText(frame_display, f"Status: PELACAKAN", 
+                                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            else:
+                cv2.putText(frame_display, f"Status: GARIS HILANG ({line_recovery_handler.lost_count})", 
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            # Tampilkan jendela OpenCV
+            cv2.imshow("Line Follower Live", cv2.resize(frame_display, (640, 480)))
+            cv2.imshow("Binary Processed ROI", cv2.resize(binary_frame, (320, 240)))
+            cv2.imshow("Cleaned ROI for Contour", cv2.resize(roi_frame, (320, 100)))
+
+            # Keluar dari loop jika tombol 'q' ditekan
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+            frame_counter += 1
+            time.sleep(0.01) # DIUBAH: Sedikit lebih cepat (sekitar 100 FPS max) jika memungkinkan
+            
+    except KeyboardInterrupt:
+        print("\n[INFO] Program dihentikan oleh pengguna (KeyboardInterrupt).")
+    except Exception as e:
+        print(f"[CRITICAL ERROR] Terjadi error tak terduga: {e}")
+    finally:
+        print("[INFO] Menghentikan motor dan membersihkan sumber daya.")
+        send_motor_commands(serial_port, 0, 0) # Pastikan motor berhenti total
+        if serial_port and serial_port.is_open:
+            serial_port.close() # Tutup port serial
+        camera.stop() # Hentikan kamera
+        cv2.destroyAllWindows() # Tutup semua jendela OpenCV
+        print("[INFO] Program selesai.")
+
+if __name__ == "__main__":
+    main()
