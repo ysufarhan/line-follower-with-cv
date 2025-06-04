@@ -16,7 +16,7 @@ def on_trackbar_change(val):
 
 # --- Kelas untuk Filter Error (Rata-rata Bergerak) ---
 class ErrorFilter:
-    def __init__(self, window_size=3):
+    def __init__(self, window_size=3): # Sedikit tingkatkan window_size untuk stabilitas
         self.window_size = window_size
         self.error_history = []
 
@@ -26,12 +26,12 @@ class ErrorFilter:
             self.error_history.pop(0)
         return int(sum(self.error_history) / len(self.error_history))
 
-# --- Kelas untuk Pemulihan Garis ---
+# --- Kelas untuk Pemulihan Garis (Baru Ditambahkan/Disesuaikan) ---
 class LineRecovery:
     def __init__(self):
         self.lost_count = 0 # Menghitung berapa frame garis hilang
         self.last_valid_error_direction = 0 # Menyimpan arah error terakhir (+:kanan, -:kiri)
-        self.search_speed = 40 # DIUBAH: Kecepatan putar saat mencari garis disesuaikan dengan BASE_PWM (45)
+        self.search_speed = 40 # Kecepatan PWM saat berputar mencari garis
 
     def handle_line_lost(self, ser_instance):
         self.lost_count += 1
@@ -58,68 +58,55 @@ class LineRecovery:
 # --- Setup Logika Fuzzy (FLC) ---
 def setup_fuzzy_logic():
     # Definisi Universe (Rentang Nilai Input/Output)
-    # Rentang error dan delta diperluas sedikit untuk menampung belokan tajam
     error = ctrl.Antecedent(np.arange(-250, 251, 1), 'error') 
     delta = ctrl.Antecedent(np.arange(-180, 181, 1), 'delta') 
-    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output') # Rentang Output FLC tetap
+    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output') 
 
-    # CUSTOM MEMBERSHIP FUNCTIONS
-    # DIUBAH: Penyesuaian Krusial untuk respons lebih halus dan stabil
-    # Fokus pada lurus sempurna dan belok yang responsif namun tidak berlebihan
-
-    # ERROR: Posisi garis relatif terhadap pusat kamera (pusat: 0)
+    # CUSTOM MEMBERSHIP FUNCTIONS (Fungsi Keanggotaan)
     error['NL'] = fuzz.trimf(error.universe, [-250, -150, -60]) 
     error['NS'] = fuzz.trimf(error.universe, [-80, -30, -10])  
-    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])     # DIUBAH: Dilebarkan sedikit untuk stabilitas LURUS
+    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])     
     error['PS'] = fuzz.trimf(error.universe, [10, 30, 80])     
     error['PL'] = fuzz.trimf(error.universe, [60, 150, 250])   
 
-    # DELTA: Perubahan error antar frame (kecepatan error)
     delta['NL'] = fuzz.trimf(delta.universe, [-180, -90, -30])
     delta['NS'] = fuzz.trimf(delta.universe, [-40, -15, -5])   
     delta['Z']  = fuzz.trimf(delta.universe, [-7, 0, 7])       
     delta['PS'] = fuzz.trimf(delta.universe, [5, 15, 40])
     delta['PL'] = fuzz.trimf(delta.universe, [30, 90, 180])
 
-    # OUTPUT: Nilai kontrol yang akan digunakan untuk menghitung PWM
-    # Rentang ini tetap relatif besar, nanti akan diskalakan dengan SCALING_FACTOR
     output['L']  = fuzz.trimf(output.universe, [-150, -100, -50]) 
     output['LS'] = fuzz.trimf(output.universe, [-60, -20, -5])   
-    output['Z']  = fuzz.trimf(output.universe, [-3, 0, 3])      # DIUBAH: SANGAT SEMPIT untuk lurus sempurna
+    output['Z']  = fuzz.trimf(output.universe, [-3, 0, 3])      
     output['RS'] = fuzz.trimf(output.universe, [5, 20, 60])     
     output['R']  = fuzz.trimf(output.universe, [50, 100, 150])   
 
     # Rule Base
     rules = [
-        # Error Negative Large (Garis di kiri jauh dari pusat) -> Belok Kanan Kuat
         ctrl.Rule(error['NL'] & delta['NL'], output['L']), 
         ctrl.Rule(error['NL'] & delta['NS'], output['L']), 
         ctrl.Rule(error['NL'] & delta['Z'], output['LS']), 
         ctrl.Rule(error['NL'] & delta['PS'], output['Z']), 
         ctrl.Rule(error['NL'] & delta['PL'], output['Z']), 
 
-        # Error Negative Small (Garis di kiri sedikit dari pusat) -> Belok Kanan Ringan
         ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['NS'] & delta['NS'], output['Z']), 
         ctrl.Rule(error['NS'] & delta['Z'], output['Z']),  
         ctrl.Rule(error['NS'] & delta['PS'], output['RS']),
         ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        # Error Zero (Garis di tengah) -> Prioritas Utama: Lurus Sempurna
         ctrl.Rule(error['Z'] & delta['NL'], output['LS']), 
         ctrl.Rule(error['Z'] & delta['NS'], output['Z']),  
         ctrl.Rule(error['Z'] & delta['Z'], output['Z']),   
         ctrl.Rule(error['Z'] & delta['PS'], output['Z']),  
         ctrl.Rule(error['Z'] & delta['PL'], output['RS']), 
 
-        # Error Positive Small (Garis di kanan sedikit dari pusat) -> Belok Kiri Ringan
         ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
         ctrl.Rule(error['PS'] & delta['NS'], output['RS']),
         ctrl.Rule(error['PS'] & delta['Z'], output['Z']),  
         ctrl.Rule(error['PS'] & delta['PS'], output['Z']), 
         ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
 
-        # Error Positive Large (Garis di kanan jauh dari pusat) -> Belok Kiri Kuat
         ctrl.Rule(error['PL'] & delta['NL'], output['Z']), 
         ctrl.Rule(error['PL'] & delta['NS'], output['Z']), 
         ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
@@ -142,7 +129,7 @@ def setup_camera():
 # --- Setup Komunikasi Serial ---
 def setup_serial():
     try:
-        ser = serial.Serial('/dev/serial0', 115200, timeout=0.1) 
+        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=0.1) 
         print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
@@ -155,12 +142,15 @@ def process_image(frame, display_mode=False):
     global manual_threshold_value 
 
     # ROI dimulai lebih tinggi (melihat lebih jauh ke depan)
-    roi_start_y = 120 # Dulu 160, sekarang 120 (melihat lebih jauh ke depan)
+    # DIUBAH: ROI disesuaikan untuk melihat lebih jauh ke depan.
+    # Nilai 120 (dari 0-240) artinya ROI dimulai sekitar tengah frame.
+    roi_start_y = 120 # DIUBAH: Dulu 160, sekarang 120
     roi_end_y = 240 # Tetap sampai bawah frame
     
     if frame.shape[0] < roi_end_y:
         print("[ERROR] Frame terlalu kecil untuk ROI yang ditentukan.")
-        return None, None, None, 0 # Menambahkan nilai default untuk roi_start_y
+        # Mengembalikan 0 untuk roi_start_y jika frame tidak valid
+        return None, None, None, 0 
         
     roi_color = frame[roi_start_y:roi_end_y, :] 
     
@@ -174,7 +164,7 @@ def process_image(frame, display_mode=False):
     binary_roi_clean = cv2.morphologyEx(binary_roi_clean, cv2.MORPH_OPEN, kernel, iterations=1) 
 
     if display_mode:
-        gray_full = cv2.cvtColor(frame, cv2.BGR2GRAY) # OpenCV memerlukan frame berwarna untuk grayscale
+        gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Memastikan konversi dari frame berwarna
         blurred_full = cv2.GaussianBlur(gray_full, (5,5), 0)
         _, binary_full = cv2.threshold(blurred_full, manual_threshold_value, 255, cv2.THRESH_BINARY_INV)
         return gray_full, binary_full, binary_roi_clean, roi_start_y 
@@ -191,7 +181,7 @@ def calculate_line_position(roi_binary, roi_start_y):
     return False, 0, 0
 
 # --- Menghitung Output Kontrol Fuzzy ---
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
+def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error): 
     try:
         fuzzy_ctrl.input['error'] = np.clip(error_val, -250, 250) 
         fuzzy_ctrl.input['delta'] = np.clip(delta_error, -180, 180) 
@@ -201,8 +191,10 @@ def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
         return 0.0
 
 # --- Menghitung Nilai PWM Motor ---
-def calculate_motor_pwm(kontrol, base_pwm=45, scaling_factor=0.08): # BASE_PWM dan SCALING_FACTOR disesuaikan dengan input Anda
-    FLC_DEAD_ZONE = 10 
+def calculate_motor_pwm(kontrol, base_pwm=45, scaling_factor=0.08): 
+    # FLC Dead Zone: Jika kontrol sangat kecil, anggap robot harus lurus.
+    # Membantu stabilitas di garis lurus, mencegah zigzag kecil.
+    FLC_DEAD_ZONE = 10 # Ukuran dead zone (dalam nilai output FLC)
     
     if abs(kontrol) < FLC_DEAD_ZONE:
         kontrol_scaled = 0 
@@ -212,8 +204,8 @@ def calculate_motor_pwm(kontrol, base_pwm=45, scaling_factor=0.08): # BASE_PWM d
     pwm_kiri = base_pwm + kontrol_scaled
     pwm_kanan = base_pwm - kontrol_scaled
 
-    MIN_PWM_OUTPUT = 35 # MIN_PWM_OUTPUT sesuai input Anda
-    MAX_PWM_OUTPUT = 55 # DIUBAH: MAX_PWM_OUTPUT disesuaikan untuk rentang yang simetris
+    MIN_PWM_OUTPUT = 35 # Sesuai input Anda
+    MAX_PWM_OUTPUT = 55 # Disesuaikan untuk rentang yang simetris
 
     pwm_kiri = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kiri))
     pwm_kanan = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kanan))
@@ -240,7 +232,7 @@ def main():
     picam2 = setup_camera()
     ser = setup_serial()
     error_filter = ErrorFilter(window_size=3) 
-    line_recovery_handler = LineRecovery() 
+    line_recovery_handler = LineRecovery() # Instansiasi LineRecovery
 
     prev_error = 0
     frame_count = 0
@@ -265,13 +257,14 @@ def main():
             gray_full, binary_full, roi_binary, roi_start_y = process_image(frame, display_mode=DISPLAY_GUI)
             
             if roi_binary is None:
-                recovery_action = line_recovery_handler.handle_line_lost(ser)
-                prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan
+                # Menangani kasus ROI tidak valid (misalnya, frame error dari kamera)
+                send_motor_commands(ser, 0, 0)
                 if frame_count % 30 == 0:
-                    print(f"[DEBUG] Gagal memproses frame: ROI tidak valid. Aksi pemulihan: {recovery_action}")
+                    print("[DEBUG] Gagal memproses frame: ROI tidak valid. Robot berhenti.")
                 frame_count += 1
                 continue
 
+            # DIUBAH: Kirim roi_start_y ke calculate_line_position
             line_detected, cx, cy = calculate_line_position(roi_binary, roi_start_y)
             
             if line_detected:
@@ -289,6 +282,7 @@ def main():
                 if frame_count % 10 == 0:
                     print(f"[DEBUG] Err:{error:4d}, ΔErr:{delta_error:3d}, FLC:{kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
             else:
+                # DIUBAH: Panggil LineRecovery saat garis tidak terdeteksi
                 recovery_action = line_recovery_handler.handle_line_lost(ser)
                 prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan
                 if frame_count % 20 == 0:
@@ -299,22 +293,22 @@ def main():
                 frame_for_display = frame.copy()
                 
                 # Garis tengah acuan (hijau)
-                cv2.line(frame_for_display, (center_x_frame, 0), (center_x_frame, height), (0, 255, 0), 2)
+                cv2.line(frame_for_display, (width // 2, 0), (width // 2, height), (0, 255, 0), 2)
                 
                 # Gambar kotak ROI (biru)
                 cv2.rectangle(frame_for_display, (0, roi_start_y), (width, roi_end_y), (255, 0, 0), 2) 
 
                 # Garis bantu indikasi belok (kuning)
                 flc_error_z_boundary = 15 
-                cv2.line(frame_for_display, (center_x_frame - flc_error_z_boundary, roi_start_y), (center_x_frame - flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
-                cv2.line(frame_for_display, (center_x_frame + flc_error_z_boundary, roi_start_y), (center_x_frame + flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
+                cv2.line(frame_for_display, (width // 2 - flc_error_z_boundary, roi_start_y), (width // 2 - flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
+                cv2.line(frame_for_display, (width // 2 + flc_error_z_boundary, roi_start_y), (width // 2 + flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
 
                 if line_detected:
                     cv2.circle(frame_for_display, (cx, cy), 5, (0, 0, 255), -1)
                     cv2.putText(frame_for_display, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 else: # Tampilkan status pemulihan jika garis hilang
                     cv2.putText(frame_for_display, f"LOST: {line_recovery_handler.lost_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    # Ini menampilkan aksi pemulihan saat ini
+                    # Menampilkan aksi pemulihan saat ini tanpa memanggil handle_line_lost lagi
                     current_recovery_action = "STOP_SEARCH" if line_recovery_handler.lost_count < 10 else ("SEARCH_RIGHT_SPIN" if line_recovery_handler.last_valid_error_direction > 0 else "SEARCH_LEFT_SPIN")
                     cv2.putText(frame_for_display, f"ACTION: {current_recovery_action}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
