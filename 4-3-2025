@@ -145,19 +145,45 @@ def setup_serial():
 def process_image(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    roi = binary[160:240, :]
+    
+    # PERBAIKAN: Gunakan threshold adaptif untuk hasil yang lebih konsisten
+    # Jika garis HITAM di atas background PUTIH, gunakan THRESH_BINARY_INV
+    # Jika garis PUTIH di atas background HITAM, gunakan THRESH_BINARY
+    
+    # Coba deteksi otomatis: periksa rata-rata intensitas
+    mean_intensity = np.mean(gray)
+    
+    if mean_intensity > 127:  # Background terang, garis gelap
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        print(f"[THRESH] Background terang detected (mean: {mean_intensity:.1f}) - BINARY_INV")
+    else:  # Background gelap, garis terang
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        print(f"[THRESH] Background gelap detected (mean: {mean_intensity:.1f}) - BINARY")
+    
+    # Perbaikan ROI - ambil area tengah yang lebih besar untuk deteksi yang lebih stabil
+    roi = binary[140:240, :]  # Diperluas dari 160:240 ke 140:240
     return gray, binary, roi
 
 def calculate_line_position(roi):
+    # Perbaikan morphological operations untuk deteksi garis yang lebih baik
     kernel = np.ones((3,3), np.uint8)
     roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
     roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
+    
+    # Tambahan: Erosi untuk menipiskan garis jika terlalu tebal
+    roi_clean = cv2.erode(roi_clean, kernel, iterations=1)
+    
     M = cv2.moments(roi_clean)
-    if M['m00'] > 100:
+    if M['m00'] > 50:  # Turunkan threshold untuk deteksi yang lebih sensitif
         cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 160
-        return True, cx, cy
+        cy = int(M['m01'] / M['m00']) + 140  # Sesuaikan dengan ROI baru (140:240)
+        
+        # PERBAIKAN: Tambahkan validasi apakah cx dalam range yang wajar
+        if 0 <= cx <= 320:  # Pastikan cx dalam batas frame
+            return True, cx, cy
+        else:
+            print(f"[WARNING] cx out of range: {cx}")
+            return False, 0, 0
     return False, 0, 0
 
 def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
@@ -226,15 +252,17 @@ def main():
                 if frame_count % 20 == 0:
                     print("[DEBUG] Garis tidak terdeteksi")
 
-            # Visualisasi
+            # Visualisasi dengan informasi threshold
             frame_with_line = frame.copy()
-            cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
+            cv2.line(frame_with_line, (160, 140), (160, 240), (0, 255, 0), 2)  # Sesuaikan dengan ROI baru
             if line_detected:
                 cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1)
                 cv2.putText(frame_with_line, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 cv2.putText(frame_with_line, f"C:{kontrol:.1f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame_with_line, f"Pos:({cx},{cy})", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             cv2.imshow("Camera View", frame_with_line)
+            cv2.imshow("Binary Full", binary)  # Tambahkan untuk debug
             cv2.imshow("Threshold ROI", roi)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
