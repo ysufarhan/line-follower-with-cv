@@ -153,11 +153,10 @@ def process_image(frame):
     
     # Multiple blur untuk mengurangi noise dari ketinggian
     blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-    blurred = cv2.medianBlur(blurred, 7)
+    blurred = cv2.medianBlur(blurred, 5)
     
-    # Adaptive threshold lebih baik untuk lighting tidak merata
-    binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                   cv2.THRESH_BINARY_INV, 15, -2)
+    # OTSU thresholding - otomatis menentukan threshold optimal
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
     # ROI lebih lebar dan lebih jauh untuk kamera tinggi
     height, width = binary.shape
