@@ -141,17 +141,18 @@ def setup_serial():
 def process_image(frame, display_mode=False):
     global manual_threshold_value 
 
-    # Inisialisasi default untuk ROI
-    roi_start_y = 120 
-    roi_end_y = 240 
+    # Inisialisasi nilai ROI yang akan dikembalikan (default)
+    # Ini penting agar roi_start_y dan roi_end_y selalu terdefinisi
+    roi_start_y_local = 120 
+    roi_end_y_local = 240 
     
     # Cek ukuran frame sebelum memproses
-    if frame.shape[0] < roi_end_y:
-        print("[ERROR] Frame terlalu kecil untuk ROI yang ditentukan. Menggunakan default ROI.")
-        # Mengembalikan nilai default untuk roi_start_y dan roi_end_y
-        return None, None, None, roi_start_y, roi_end_y 
+    if frame.shape[0] < roi_end_y_local:
+        print("[ERROR] Frame terlalu kecil untuk ROI yang ditentukan. Menggunakan default ROI untuk visualisasi.")
+        # Mengembalikan nilai default untuk visualisasi jika frame tidak valid
+        return None, None, None, roi_start_y_local, roi_end_y_local 
         
-    roi_color = frame[roi_start_y:roi_end_y, :] 
+    roi_color = frame[roi_start_y_local:roi_end_y_local, :] 
     
     gray_roi = cv2.cvtColor(roi_color, cv2.COLOR_BGR2GRAY)
     blurred_roi = cv2.medianBlur(gray_roi, 3) 
@@ -166,9 +167,9 @@ def process_image(frame, display_mode=False):
         gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) 
         blurred_full = cv2.GaussianBlur(gray_full, (5,5), 0)
         _, binary_full = cv2.threshold(blurred_full, manual_threshold_value, 255, cv2.THRESH_BINARY_INV)
-        return gray_full, binary_full, binary_roi_clean, roi_start_y, roi_end_y 
+        return gray_full, binary_full, binary_roi_clean, roi_start_y_local, roi_end_y_local 
     else:
-        return None, None, binary_roi_clean, roi_start_y, roi_end_y 
+        return None, None, binary_roi_clean, roi_start_y_local, roi_end_y_local 
 
 # --- Menghitung Posisi Garis ---
 def calculate_line_position(roi_binary, roi_start_y): 
@@ -254,26 +255,24 @@ def main():
             gray_full, binary_full, roi_binary, roi_start_y, roi_end_y = process_image(frame, display_mode=DISPLAY_GUI)
             
             if roi_binary is None:
-                # Menggunakan default roi_start_y/end_y untuk visualisasi jika frame error
-                # Ini akan membuat visualisasi tetap muncul, meskipun datanya mungkin tidak akurat
-                # untuk frame saat ini karena gambar error.
-                roi_start_y_display = 120 # Default untuk visualisasi
-                roi_end_y_display = 240   # Default untuk visualisasi
-
-                recovery_action = line_recovery_handler.handle_line_lost(ser)
+                # Karena roi_start_y dan roi_end_y sudah diinisialisasi di process_image
+                # kita bisa langsung menggunakannya di sini.
+                # Namun, untuk visualisasi, kita perlu memastikan nilai tersebut relevan dengan tampilan.
+                # Ini adalah kasus di mana frame dari kamera mungkin error, bukan garis hilang.
+                recovery_action = line_recovery_handler.handle_line_lost(ser) # Tetap panggil recovery
                 prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan
                 if frame_count % 30 == 0:
                     print(f"[DEBUG] Gagal memproses frame: ROI tidak valid. Aksi pemulihan: {recovery_action}")
                 frame_count += 1
                 
-                # Menampilkan visualisasi dengan default ROI jika frame error
+                # Menampilkan visualisasi dengan ROI yang dikembalikan (atau default jika ada masalah frame)
                 if DISPLAY_GUI:
                     frame_for_display = frame.copy()
                     cv2.line(frame_for_display, (width // 2, 0), (width // 2, height), (0, 255, 0), 2)
-                    cv2.rectangle(frame_for_display, (0, roi_start_y_display), (width, roi_end_y_display), (255, 0, 0), 2)
+                    cv2.rectangle(frame_for_display, (0, roi_start_y), (width, roi_end_y), (255, 0, 0), 2) # Gunakan roi_start_y/end_y yang dikembalikan
                     flc_error_z_boundary = 15
-                    cv2.line(frame_for_display, (width // 2 - flc_error_z_boundary, roi_start_y_display), (width // 2 - flc_error_z_boundary, roi_end_y_display), (0, 255, 255), 1)
-                    cv2.line(frame_for_display, (width // 2 + flc_error_z_boundary, roi_start_y_display), (width // 2 + flc_error_z_boundary, roi_end_y_display), (0, 255, 255), 1)
+                    cv2.line(frame_for_display, (width // 2 - flc_error_z_boundary, roi_start_y), (width // 2 - flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
+                    cv2.line(frame_for_display, (width // 2 + flc_error_z_boundary, roi_start_y), (width // 2 + flc_error_z_boundary, roi_end_y), (0, 255, 255), 1)
                     
                     cv2.putText(frame_for_display, f"LOST: {line_recovery_handler.lost_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                     current_recovery_action = "STOP_SEARCH" if line_recovery_handler.lost_count < 10 else ("SEARCH_RIGHT_SPIN" if line_recovery_handler.last_valid_error_direction > 0 else "SEARCH_LEFT_SPIN")
@@ -281,13 +280,13 @@ def main():
                     cv2.putText(frame_for_display, f"Thresh: {manual_threshold_value}", (10, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
                     cv2.imshow("Camera View", frame_for_display)
-                    # Tidak menampilkan Threshold ROI jika binary_full juga None
+                    # Pastikan binary_full valid sebelum ditampilkan
                     if binary_full is not None:
                         cv2.imshow("Threshold ROI", binary_full)
                     else:
+                        # Jika binary_full None, tampilkan dummy kosong agar jendela tidak crash
                         try:
-                            # Jika binary_full None, coba tampilkan dummy agar jendela tidak kosong
-                            cv2.imshow("Threshold ROI", np.zeros((roi_end_y_display - roi_start_y_display, width), dtype=np.uint8))
+                            cv2.imshow("Threshold ROI", np.zeros((roi_end_y - roi_start_y, width), dtype=np.uint8))
                         except Exception as e:
                             print(f"[VISUALIZATION ERROR] Could not display dummy ROI: {e}")
 
@@ -295,7 +294,7 @@ def main():
                         break
                 continue # Langsung ke iterasi berikutnya
             
-            # DIUBAH: Kirim roi_start_y ke calculate_line_position
+            # Kirim roi_start_y ke calculate_line_position
             line_detected, cx, cy = calculate_line_position(roi_binary, roi_start_y)
             
             if line_detected:
