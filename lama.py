@@ -1,209 +1,217 @@
-from picamera2 import Picamera2
-import cv2
-import numpy as np
-import time
-import serial
-import skfuzzy as fuzz
-from skfuzzy import control as ctrl
+#include <Arduino.h>
+#include <Wire.h>          // Diperlukan untuk komunikasi I2C
+#include <Adafruit_VL53L0X.h> // Library untuk sensor VL53L0X
 
-class ErrorFilter:
-    def __init__(self, window_size=3):
-        self.window_size = window_size
-        self.error_history = []
+// --- Definisi Pin Motor ---
+// Sesuaikan pin-pin ini dengan koneksi hardware Anda pada ESP32
+#define ENA 14     // PWM Motor Kiri (Enable A)
+#define IN1 27     // Input 1 Motor Kiri
+#define IN2 26     // Input 2 Motor Kiri
+#define IN3 25     // Input 3 Motor Kanan
+#define IN4 33     // Input 4 Motor Kanan
+#define ENB 32     // PWM Motor Kanan (Enable B)
 
-    def filter_error(self, error):
-        self.error_history.append(error)
-        if len(self.error_history) > self.window_size:
-            self.error_history.pop(0)
-        return int(sum(self.error_history) / len(self.error_history))
+// --- Variabel untuk Parsing Serial ---
+String inputString = "";        // String untuk menyimpan data serial yang masuk
+bool stringComplete = false;    // Flag yang menandakan string lengkap (diakhiri newline)
 
-def setup_fuzzy_logic():
-    # Definisi universe yang diperluas untuk responsivitas lebih baik
-    error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
-    delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
-    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
+// --- Variabel Watchdog Timer ---
+// Berfungsi untuk menghentikan motor secara otomatis jika tidak ada perintah yang diterima dari Pi
+unsigned long lastCommandTime = 0;      // Waktu terakhir perintah diterima (dalam ms)
+const unsigned long WATCHDOG_TIMEOUT = 500; // Timeout watchdog dalam milidetik (misal: 500ms = 0.5 detik)
 
-    # CUSTOM MEMBERSHIP FUNCTIONS - Fine-tuned untuk mengurangi error
-    # ERROR - Lebih sensitif pada zona kecil untuk presisi tinggi
-    error['NL'] = fuzz.trimf(error.universe, [-200, -160, -70])
-    error['NS'] = fuzz.trimf(error.universe, [-100, -40, -8])
-    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])      # Zona netral lebih sempit
-    error['PS'] = fuzz.trimf(error.universe, [8, 40, 100])
-    error['PL'] = fuzz.trimf(error.universe, [70, 160, 200])
+// --- Konfigurasi Sensor VL53L0X ---
+Adafruit_VL53L0X lox = Adafruit_VL53L0X(); // Membuat objek sensor VL53L0X
+const int OBSTACLE_DISTANCE_CM = 2;       // Jarak ambang batas (dalam cm) untuk berhenti
+const int VL53L0X_READ_INTERVAL = 100;    // Interval membaca sensor (ms) untuk menghindari overloading I2C bus
+unsigned long lastVL53L0XReadTime = 0;    // Waktu terakhir pembacaan sensor VL53L0X
 
-    # DELTA - Lebih agresif untuk koreksi cepat
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -100, -40])
-    delta['NS'] = fuzz.trimf(delta.universe, [-60, -25, -4])
-    delta['Z']  = fuzz.trimf(delta.universe, [-8, 0, 8])        # Zona netral lebih sempit
-    delta['PS'] = fuzz.trimf(delta.universe, [4, 25, 60])
-    delta['PL'] = fuzz.trimf(delta.universe, [40, 100, 150])
+// --- Variabel State ---
+bool obstacleDetected = false; // Flag untuk menandakan apakah ada halangan
 
-    # OUTPUT - Lebih agresif pada koreksi kecil dan besar
-    output['L']  = fuzz.trimf(output.universe, [-150, -110, -75])
-    output['LS'] = fuzz.trimf(output.universe, [-85, -45, -12])
-    output['Z']  = fuzz.trimf(output.universe, [-5, 0, 5])      # Zona netral sangat sempit
-    output['RS'] = fuzz.trimf(output.universe, [12, 45, 85])
-    output['R']  = fuzz.trimf(output.universe, [75, 110, 150])
+// --- Fungsi Setup Arduino (Dijalankan sekali saat booting) ---
+void setup() {
+  // Inisialisasi komunikasi Serial pada Baud Rate 115200
+  Serial.begin(115200);
+  inputString.reserve(50); // Mengalokasikan memori untuk string input, agar lebih efisien
 
-    # Rules yang sama seperti sebelumnya
-    rules = [
-        ctrl.Rule(error['NL'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
+  // Setup pin motor
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
 
-        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['NS'] & delta['NS'], output['LS']),
-        ctrl.Rule(error['NS'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
+  // Setup PWM Channels
+  ledcSetup(0, 5000, 8);  // Channel 0 untuk ENA (PWM Motor Kiri)
+  ledcSetup(1, 5000, 8);  // Channel 1 untuk ENB (PWM Motor Kanan)
+  ledcAttachPin(ENA, 0);
+  ledcAttachPin(ENB, 1);
 
-        ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
+  // Menghentikan motor saat startup
+  stopMotors();
+  lastCommandTime = millis(); // Menginisialisasi waktu terakhir perintah (untuk watchdog)
 
-        ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PS'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['PS'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
+  Serial.println("ESP32 Motor Controller Siap");
 
-        ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PL'], output['R']),
-    ]
+  // --- Inisialisasi Sensor VL53L0X ---
+  Wire.begin(); // Memulai komunikasi I2C
+  Serial.println("Memulai sensor VL53L0X...");
+  if (!lox.begin()) {
+    Serial.println("Gagal menemukan sensor VL53L0X. Pastikan wiring benar!");
+    while(1); // Berhenti di sini jika sensor tidak terdeteksi
+  }
+  Serial.println("Sensor VL53L0X terdeteksi!");
 
-    control_system = ctrl.ControlSystem(rules)
-    return ctrl.ControlSystemSimulation(control_system)
+  // Opsional: Sesuaikan mode rentang dan presisi sensor
+  // lox.setMeasurementTimingBudget(20000); // Waktu pengukuran (mikrodetik). Lebih lama = lebih akurat
+}
 
-def setup_camera():
-    picam2 = Picamera2()
-    config = picam2.create_still_configuration(main={"size": (320, 240)})
-    picam2.configure(config)
-    picam2.start()
-    return picam2
+// --- Fungsi Loop Arduino (Dijalankan berulang-ulang) ---
+void loop() {
+  // --- Baca Data Serial dan Kontrol Motor ---
+  if (stringComplete) {
+    int commaIndex = inputString.indexOf(',');
+    if (commaIndex > 0) {
+      String pwmLeftStr = inputString.substring(0, commaIndex);
+      String pwmRightStr = inputString.substring(commaIndex + 1);
 
-def setup_serial():
-    try:
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
-        print("[UART] Port serial berhasil dibuka")
-        return ser
-    except Exception as e:
-        print(f"[UART ERROR] Gagal membuka serial port: {e}")
-        return None
-
-def process_image(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    roi = binary[160:240, :]
-    return gray, binary, roi
-
-def calculate_line_position(roi):
-    kernel = np.ones((3,3), np.uint8)
-    roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
-    roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
-    M = cv2.moments(roi_clean)
-    if M['m00'] > 100:
-        cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 160
-        return True, cx, cy
-    return False, 0, 0
-
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
-    try:
-        # Sesuaikan range dengan universe yang baru
-        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
-        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
-        fuzzy_ctrl.compute()
-        return np.clip(fuzzy_ctrl.output['output'], -150, 150)
-    except Exception as e:
-        print(f"[FLC ERROR] {e}")
-        return 0.0
-
-def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.4):
-    # Tingkatkan scaling_factor untuk koreksi lebih agresif
-    kontrol_scaled = kontrol * scaling_factor
-    pwm_kiri = base_pwm + kontrol_scaled
-    pwm_kanan = base_pwm - kontrol_scaled
+      if (pwmLeftStr.length() > 0 && pwmRightStr.length() > 0) {
+        int pwmLeft = pwmLeftStr.toInt();
+        int pwmRight = pwmRightStr.toInt();
+        
+        // Hanya set motor jika tidak ada halangan
+        if (!obstacleDetected) {
+          setMotors(pwmLeft, pwmRight);
+        } else {
+          stopMotors(); // Pastikan motor berhenti jika ada halangan
+          // Serial.println("Obstacle detected, motors stopped."); // Debug
+        }
+        
+        lastCommandTime = millis(); // Reset watchdog timer
+        
+        // Debug output (opsional, bisa dihapus untuk produksi)
+        Serial.print("Diterima - Kiri: ");
+        Serial.print(pwmLeft);
+        Serial.print(", Kanan: ");
+        Serial.print(pwmRight);
+        Serial.print(" | Halangan: ");
+        Serial.println(obstacleDetected ? "YA" : "TIDAK");
+      } else {
+        Serial.println("Error: Nilai PWM kosong diterima.");
+      }
+    } else {
+      Serial.println("Error: Format serial tidak valid (tidak ada koma).");
+    }
     
-    # Pastikan PWM tidak terlalu rendah yang bisa menyebabkan motor berhenti
-    pwm_kiri = max(30, min(85, pwm_kiri))  
-    pwm_kanan = max(30, min(85, pwm_kanan))
-    return int(pwm_kiri), int(pwm_kanan)
+    inputString = "";
+    stringComplete = false;
+  }
 
-def send_motor_commands(ser, pwm_kiri, pwm_kanan):
-    if ser:
-        try:
-            cmd = f"{pwm_kiri},{pwm_kanan}\n"
-            ser.write(cmd.encode())
-            ser.flush()
-        except Exception as e:
-            print(f"[SERIAL ERROR] {e}")
+  // --- Watchdog Timer ---
+  if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
+    stopMotors();
+    static bool watchdogActive = false;
+    if (!watchdogActive) {
+      Serial.println("Watchdog: Tidak ada perintah, motor dihentikan.");
+      watchdogActive = true;
+    }
+  } else {
+    static bool watchdogActive = false; 
+    if (watchdogActive) { 
+        // Serial.println("Watchdog: Perintah kembali aktif.");
+        watchdogActive = false;
+    }
+  }
 
-def main():
-    fuzzy_ctrl = setup_fuzzy_logic()
-    picam2 = setup_camera()
-    ser = setup_serial()
-    error_filter = ErrorFilter(window_size=1)  # Hilangkan filtering untuk respons maksimal
+  // --- Pembacaan Sensor VL53L0X ---
+  if (millis() - lastVL53L0XReadTime > VL53L0X_READ_INTERVAL) {
+    VL53L0X_RangingMeasurementData_t measure;
+    lox.rangingTest(&measure, false); // Baca pengukuran tanpa menampilkan output default
 
-    prev_error = 0
-    frame_count = 0
+    if (measure.RangeStatus != 4) {  // Status 4 berarti "out of range" atau "signal failed"
+      // Konversi jarak dari mm ke cm
+      int distanceCm = measure.RangeMilliMeter / 10;
+      Serial.print("Jarak: ");
+      Serial.print(distanceCm);
+      Serial.println(" cm");
 
-    try:
-        while True:
-            frame = picam2.capture_array()
-            gray, binary, roi = process_image(frame)
+      if (distanceCm > 0 && distanceCm <= OBSTACLE_DISTANCE_CM) {
+        obstacleDetected = true;
+        stopMotors(); // Hentikan motor segera jika ada halangan
+        // Serial.println("!!! HALANGAN TERDETEKSI - MOTOR DIHENTIKAN !!!");
+      } else {
+        obstacleDetected = false;
+      }
+    } else {
+      // Jika sensor tidak mendapatkan pengukuran valid (misal terlalu jauh atau terlalu dekat)
+      // Kita asumsikan tidak ada halangan (atau diluar jangkauan deteksi ambang batas)
+      obstacleDetected = false;
+      // Serial.println("Jarak: Di luar jangkauan/Invalid");
+    }
+    lastVL53L0XReadTime = millis();
+  }
+}
 
-            line_detected, cx, cy = calculate_line_position(roi)
-            if line_detected:
-                error = cx - 160
-                error = error_filter.filter_error(error)
-                delta_error = error - prev_error
-                prev_error = error
+// --- Fungsi untuk Menggerakkan Motor ---
+// Menerima nilai PWM dari -100 (mundur) hingga 100 (maju)
+void setMotors(int pwmLeft, int pwmRight) {
+  // Hanya gerakkan motor jika tidak ada halangan
+  if (obstacleDetected) {
+    stopMotors();
+    return; // Keluar dari fungsi setMotors
+  }
 
-                kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
-                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
-                send_motor_commands(ser, pwm_kiri, pwm_kanan)
+  // Kontrol Motor Kiri
+  if (pwmLeft > 0) { // Jika PWM positif, motor maju
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    ledcWrite(0, map(pwmLeft, 0, 100, 0, 255));
+  } else if (pwmLeft < 0) { // Jika PWM negatif, motor mundur
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    ledcWrite(0, map(abs(pwmLeft), 0, 100, 0, 255));
+  } else { // Jika PWM nol, motor diam
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    ledcWrite(0, 0);
+  }
 
-                if frame_count % 10 == 0:  # Monitoring lebih sering untuk analisis
-                    print(f"[DEBUG] Error: {error:4d}, Delta: {delta_error:4d}, FLC: {kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
-                    if abs(error) > 50:
-                        print(f"[WARN]  Error besar terdeteksi: {error}")  # Warning untuk error besar
-            else:
-                send_motor_commands(ser, 0, 0)
-                if frame_count % 20 == 0:
-                    print("[DEBUG] Garis tidak terdeteksi")
+  // Kontrol Motor Kanan
+  if (pwmRight > 0) { // Maju
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    ledcWrite(1, map(pwmRight, 0, 100, 0, 255));
+  } else if (pwmRight < 0) { // Mundur
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+    ledcWrite(1, map(abs(pwmRight), 0, 100, 0, 255));
+  } else { // Diam
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+    ledcWrite(1, 0);
+  }
+}
 
-            # Tampilkan tampilan real-time untuk analisis
-            frame_with_line = frame.copy()
-            cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
-            if line_detected:
-                cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1)
-                # Tambah indikator error
-                cv2.putText(frame_with_line, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+// --- Fungsi untuk Menghentikan Motor ---
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  ledcWrite(0, 0); // Atur PWM ke nol
+  ledcWrite(1, 0);
+}
 
-            cv2.imshow("Camera View", frame_with_line)
-            cv2.imshow("Threshold ROI", roi)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-            frame_count += 1
-            time.sleep(0.03)  # Sedikit lebih cepat untuk responsivitas
-    except KeyboardInterrupt:
-        print("\n[INFO] Dihentikan oleh pengguna")
-    finally:
-        send_motor_commands(ser, 0, 0)
-        if ser:
-            ser.close()
-        picam2.stop()
-        cv2.destroyAllWindows()
-        print("[INFO] Program selesai")
-
-if __name__ == "__main__":
-    main()
+// --- Fungsi serialEvent() ---
+void serialEvent() {
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    inputString += inChar;
+    
+    if (inChar == '\n') {
+      stringComplete = true;
+    }
+  }
+}
