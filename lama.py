@@ -22,7 +22,7 @@ const unsigned long WATCHDOG_TIMEOUT = 500; // Timeout watchdog dalam milidetik 
 
 // --- Konfigurasi Sensor VL53L0X ---
 Adafruit_VL53L0X lox = Adafruit_VL53L0X(); // Membuat objek sensor VL53L0X
-const int OBSTACLE_DISTANCE_CM = 2;       // Jarak ambang batas (dalam cm) untuk berhenti
+const int OBSTACLE_DISTANCE_CM = 5;       // Jarak ambang batas (dalam cm) untuk berhenti
 const int VL53L0X_READ_INTERVAL = 100;    // Interval membaca sensor (ms) untuk menghindari overloading I2C bus
 unsigned long lastVL53L0XReadTime = 0;    // Waktu terakhir pembacaan sensor VL53L0X
 
