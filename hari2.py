@@ -320,7 +320,7 @@ def main():
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
 
                 if frame_count % 10 == 0: # Cetak debug setiap 10 frame
-                    print(f"[DEBUG] Err:{error:4d}, ΔErr:{delta_error:3d}, FLC:{kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
+                    print(f"[DEBUG] Err:{error:4d}, ÎErr:{delta_error:3d}, FLC:{kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
             else:
                 recovery_action = line_recovery_handler.handle_line_lost(ser)
                 prev_error = 0 # Reset error untuk mencegah lonjakan besar saat garis ditemukan kembali
