@@ -105,7 +105,7 @@ def setup_camera():
 # --- Setup Komunikasi Serial ---
 def setup_serial():
     try:
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=0.1) 
+        ser = serial.Serial('/dev/serial0', 115200, timeout=0.1) 
         print("[UART] Serial port opened successfully.")
         return ser
     except Exception as e:
@@ -175,7 +175,7 @@ def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.25): # DIUBAH: sc
     pwm_kanan = base_pwm - kontrol_scaled
 
     MIN_PWM_OUTPUT = 40 
-    MAX_PWM_OUTPUT = 60 
+    MAX_PWM_OUTPUT = 70 
 
     pwm_kiri = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kiri))
     pwm_kanan = max(MIN_PWM_OUTPUT, min(MAX_PWM_OUTPUT, pwm_kanan))
