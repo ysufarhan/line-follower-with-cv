@@ -5,218 +5,353 @@ import time
 import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+from threading import Thread
+import queue
 
-class ErrorFilter:
-    def __init__(self, window_size=3):
-        self.window_size = window_size
-        self.error_history = []
-        self.alpha = 0.7  # Parameter untuk exponential smoothing
-
-    def filter_error(self, error):
-        # Kombinasi moving average dan exponential smoothing
-        self.error_history.append(error)
-        if len(self.error_history) > self.window_size:
-            self.error_history.pop(0)
+class OptimizedLineFollower:
+    def __init__(self):
+        self.image_queue = queue.Queue(maxsize=2)
+        self.running = True
+        self.current_error = 0
+        self.prev_error = 0
+        self.line_detected = False
         
-        # Moving average
-        avg_error = sum(self.error_history) / len(self.error_history)
+        # Setup komponen
+        self.fuzzy_ctrl = self.setup_fuzzy_logic()
+        self.picam2 = self.setup_camera()
+        self.ser = self.setup_serial()
         
-        # Exponential smoothing untuk mengurangi noise
-        if len(self.error_history) > 1:
-            prev_avg = sum(self.error_history[:-1]) / len(self.error_history[:-1])
-            smoothed_error = self.alpha * avg_error + (1 - self.alpha) * prev_avg
-        else:
-            smoothed_error = avg_error
-            
-        return int(smoothed_error)
+        # Thread untuk capture image
+        self.capture_thread = Thread(target=self.capture_images, daemon=True)
+        
+    def setup_fuzzy_logic(self):
+        """Setup sistem fuzzy logic yang dioptimasi untuk smooth control"""
+        # Universe yang lebih fokus untuk presisi
+        error = ctrl.Antecedent(np.arange(-160, 161, 1), 'error')
+        delta = ctrl.Antecedent(np.arange(-100, 101, 1), 'delta')
+        output = ctrl.Consequent(np.arange(-100, 101, 1), 'output')
 
-def setup_fuzzy_logic():
-    # Definisi universe yang diperluas untuk responsivitas lebih baik
-    error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
-    delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
-    output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
+        # Membership functions yang dioptimasi untuk smooth turning
+        # ERROR - Zona tengah lebih lebar untuk stabilitas garis lurus
+        error['NL'] = fuzz.trimf(error.universe, [-160, -120, -60])
+        error['NS'] = fuzz.trimf(error.universe, [-80, -30, -5])
+        error['Z']  = fuzz.trimf(error.universe, [-20, 0, 20])      # Zona netral lebih lebar
+        error['PS'] = fuzz.trimf(error.universe, [5, 30, 80])
+        error['PL'] = fuzz.trimf(error.universe, [60, 120, 160])
 
-    # CUSTOM MEMBERSHIP FUNCTIONS - Dihaluskan untuk gerakan smooth
-    # ERROR - Zona netral diperlebar untuk stabilitas jalur lurus
-    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -60])
-    error['NS'] = fuzz.trimf(error.universe, [-90, -35, -5])
-    error['Z']  = fuzz.trimf(error.universe, [-12, 0, 12])      # Zona netral lebih lebar untuk stability
-    error['PS'] = fuzz.trimf(error.universe, [5, 35, 90])
-    error['PL'] = fuzz.trimf(error.universe, [60, 150, 200])
+        # DELTA - Untuk prediksi pergerakan
+        delta['NL'] = fuzz.trimf(delta.universe, [-100, -60, -20])
+        delta['NS'] = fuzz.trimf(delta.universe, [-40, -15, -3])
+        delta['Z']  = fuzz.trimf(delta.universe, [-10, 0, 10])
+        delta['PS'] = fuzz.trimf(delta.universe, [3, 15, 40])
+        delta['PL'] = fuzz.trimf(delta.universe, [20, 60, 100])
 
-    # DELTA - Zona netral diperlebar untuk mengurangi oscillation
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -30])
-    delta['NS'] = fuzz.trimf(delta.universe, [-50, -20, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-12, 0, 12])      # Zona netral lebih lebar
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 50])
-    delta['PL'] = fuzz.trimf(delta.universe, [30, 80, 150])
+        # OUTPUT - Smooth control untuk turning yang optimal
+        output['LL'] = fuzz.trimf(output.universe, [-100, -80, -50])  # Belok kiri tajam
+        output['L']  = fuzz.trimf(output.universe, [-60, -35, -15])   # Belok kiri sedang
+        output['LS'] = fuzz.trimf(output.universe, [-25, -10, -2])    # Belok kiri halus
+        output['Z']  = fuzz.trimf(output.universe, [-5, 0, 5])        # Lurus
+        output['RS'] = fuzz.trimf(output.universe, [2, 10, 25])       # Belok kanan halus
+        output['R']  = fuzz.trimf(output.universe, [15, 35, 60])      # Belok kanan sedang
+        output['RR'] = fuzz.trimf(output.universe, [50, 80, 100])     # Belok kanan tajam
 
-    # OUTPUT - Output halus dengan transisi gradual
-    output['L']  = fuzz.trimf(output.universe, [-150, -100, -60])
-    output['LS'] = fuzz.trimf(output.universe, [-75, -35, -8])
-    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])    # Zona netral lebih lebar
-    output['RS'] = fuzz.trimf(output.universe, [8, 35, 75])
-    output['R']  = fuzz.trimf(output.universe, [60, 100, 150])
+        # Rules yang dioptimasi untuk smooth control
+        rules = [
+            # Error besar kiri (NL)
+            ctrl.Rule(error['NL'] & delta['NL'], output['LL']),
+            ctrl.Rule(error['NL'] & delta['NS'], output['L']),
+            ctrl.Rule(error['NL'] & delta['Z'], output['L']),
+            ctrl.Rule(error['NL'] & delta['PS'], output['LS']),
+            ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
 
-    # Rules yang sama seperti sebelumnya
-    rules = [
-        ctrl.Rule(error['NL'] & delta['NL'], output['L']),
-        ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['Z'], output['LS']),
-        ctrl.Rule(error['NL'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NL'] & delta['PL'], output['Z']),
+            # Error sedang kiri (NS)
+            ctrl.Rule(error['NS'] & delta['NL'], output['L']),
+            ctrl.Rule(error['NS'] & delta['NS'], output['L']),
+            ctrl.Rule(error['NS'] & delta['Z'], output['LS']),
+            ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
+            ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
 
-        ctrl.Rule(error['NS'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['NS'] & delta['NS'], output['LS']),
-        ctrl.Rule(error['NS'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['NS'] & delta['PL'], output['RS']),
+            # Error netral (Z) - Prioritas lurus
+            ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
+            ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
+            ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
+            ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
+            ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
 
-        ctrl.Rule(error['Z'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['Z'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PS'], output['Z']),
-        ctrl.Rule(error['Z'] & delta['PL'], output['RS']),
+            # Error sedang kanan (PS)
+            ctrl.Rule(error['PS'] & delta['NL'], output['RS']),
+            ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
+            ctrl.Rule(error['PS'] & delta['Z'], output['RS']),
+            ctrl.Rule(error['PS'] & delta['PS'], output['R']),
+            ctrl.Rule(error['PS'] & delta['PL'], output['R']),
 
-        ctrl.Rule(error['PS'] & delta['NL'], output['LS']),
-        ctrl.Rule(error['PS'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PS'] & delta['Z'], output['Z']),
-        ctrl.Rule(error['PS'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PS'] & delta['PL'], output['RS']),
+            # Error besar kanan (PL)
+            ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
+            ctrl.Rule(error['PL'] & delta['NS'], output['RS']),
+            ctrl.Rule(error['PL'] & delta['Z'], output['R']),
+            ctrl.Rule(error['PL'] & delta['PS'], output['R']),
+            ctrl.Rule(error['PL'] & delta['PL'], output['RR']),
+        ]
 
-        ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
-        ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PL'], output['R']),
-    ]
+        control_system = ctrl.ControlSystem(rules)
+        return ctrl.ControlSystemSimulation(control_system)
 
-    control_system = ctrl.ControlSystem(rules)
-    return ctrl.ControlSystemSimulation(control_system)
+    def setup_camera(self):
+        """Setup kamera dengan resolusi optimal untuk Pi 4"""
+        picam2 = Picamera2()
+        # Resolusi yang lebih rendah untuk processing cepat
+        config = picam2.create_still_configuration(main={"size": (240, 180)})
+        picam2.configure(config)
+        picam2.start()
+        time.sleep(2)  # Warm up kamera
+        return picam2
 
-def setup_camera():
-    picam2 = Picamera2()
-    config = picam2.create_still_configuration(main={"size": (320, 240)})
-    picam2.configure(config)
-    picam2.start()
-    return picam2
-
-def setup_serial():
-    try:
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
-        print("[UART] Port serial berhasil dibuka")
-        return ser
-    except Exception as e:
-        print(f"[UART ERROR] Gagal membuka serial port: {e}")
-        return None
-
-def process_image(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    roi = binary[160:240, :]
-    return gray, binary, roi
-
-def calculate_line_position(roi):
-    kernel = np.ones((3,3), np.uint8)
-    roi_clean = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
-    roi_clean = cv2.morphologyEx(roi_clean, cv2.MORPH_OPEN, kernel)
-    M = cv2.moments(roi_clean)
-    if M['m00'] > 100:
-        cx = int(M['m10'] / M['m00'])
-        cy = int(M['m01'] / M['m00']) + 160
-        return True, cx, cy
-    return False, 0, 0
-
-def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
-    try:
-        # Sesuaikan range dengan universe yang baru
-        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
-        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
-        fuzzy_ctrl.compute()
-        return np.clip(fuzzy_ctrl.output['output'], -150, 150)
-    except Exception as e:
-        print(f"[FLC ERROR] {e}")
-        return 0.0
-
-def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.25):
-    # Scaling factor dikurangi untuk gerakan lebih halus
-    kontrol_scaled = kontrol * scaling_factor
-    pwm_kiri = base_pwm + kontrol_scaled
-    pwm_kanan = base_pwm - kontrol_scaled
-    
-    # Range PWM yang lebih konservatif untuk gerakan halus
-    pwm_kiri = max(35, min(75, pwm_kiri))  
-    pwm_kanan = max(35, min(75, pwm_kanan))
-    return int(pwm_kiri), int(pwm_kanan)
-
-def send_motor_commands(ser, pwm_kiri, pwm_kanan):
-    if ser:
+    def setup_serial(self):
+        """Setup komunikasi serial"""
         try:
-            cmd = f"{pwm_kiri},{pwm_kanan}\n"
-            ser.write(cmd.encode())
-            ser.flush()
+            ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=0.1)
+            print("[UART] Port serial berhasil dibuka")
+            return ser
         except Exception as e:
-            print(f"[SERIAL ERROR] {e}")
+            print(f"[UART ERROR] Gagal membuka serial port: {e}")
+            return None
+
+    def capture_images(self):
+        """Thread terpisah untuk capture image - mengurangi blocking"""
+        while self.running:
+            try:
+                frame = self.picam2.capture_array()
+                if not self.image_queue.full():
+                    self.image_queue.put(frame)
+                time.sleep(0.02)  # ~50 FPS capture rate
+            except:
+                pass
+
+    def process_image_optimized(self, frame):
+        """Image processing yang dioptimasi untuk kecepatan"""
+        # Crop langsung ke ROI untuk mengurangi processing
+        roi_y_start = int(frame.shape[0] * 0.7)  # 70% dari bawah
+        roi = frame[roi_y_start:, :]
+        
+        # Konversi ke grayscale hanya ROI
+        if len(roi.shape) == 3:
+            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray_roi = roi
+            
+        # Threshold adaptif yang cepat
+        _, binary = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Morphology ringan untuk cleanup
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        return binary, roi_y_start
+
+    def calculate_line_position_optimized(self, binary_roi):
+        """Perhitungan posisi garis yang dioptimasi"""
+        # Menggunakan moments untuk mencari centroid
+        M = cv2.moments(binary_roi)
+        
+        if M['m00'] > 50:  # Threshold area minimum
+            cx = int(M['m10'] / M['m00'])
+            return True, cx
+        
+        # Fallback: cari kolom dengan pixel putih terbanyak
+        column_sums = np.sum(binary_roi, axis=0)
+        if np.max(column_sums) > 20:
+            cx = np.argmax(column_sums)
+            return True, cx
+            
+        return False, 0
+
+    def compute_fuzzy_control(self, error_val, delta_error):
+        """Komputasi fuzzy control yang aman"""
+        try:
+            # Clip input sesuai universe
+            error_clipped = np.clip(error_val, -160, 160)
+            delta_clipped = np.clip(delta_error, -100, 100)
+            
+            self.fuzzy_ctrl.input['error'] = error_clipped
+            self.fuzzy_ctrl.input['delta'] = delta_clipped
+            self.fuzzy_ctrl.compute()
+            
+            return np.clip(self.fuzzy_ctrl.output['output'], -100, 100)
+        except Exception as e:
+            print(f"[FLC ERROR] {e}")
+            return 0.0
+
+    def calculate_motor_pwm_smooth(self, kontrol, base_pwm=60):
+        """
+        Perhitungan PWM yang dioptimasi untuk smooth turning
+        - Garis lurus: PWM kiri = kanan
+        - Belok kiri: PWM kanan dominan, PWM kiri disesuaikan
+        - Belok kanan: PWM kiri dominan, PWM kanan disesuaikan
+        """
+        # Scaling factor yang lebih halus
+        scaling_factor = 0.6
+        kontrol_scaled = kontrol * scaling_factor
+        
+        if abs(kontrol) < 5:  # Zona lurus
+            # PWM sama untuk kedua motor
+            pwm_kiri = base_pwm
+            pwm_kanan = base_pwm
+        elif kontrol < 0:  # Perlu belok kiri (error negatif)
+            # Motor kanan dominan (lebih cepat), motor kiri diperlambat
+            pwm_kanan = base_pwm + abs(kontrol_scaled)
+            pwm_kiri = base_pwm - abs(kontrol_scaled) * 0.7
+        else:  # Perlu belok kanan (error positif)
+            # Motor kiri dominan (lebih cepat), motor kanan diperlambat
+            pwm_kiri = base_pwm + abs(kontrol_scaled)
+            pwm_kanan = base_pwm - abs(kontrol_scaled) * 0.7
+        
+        # Batasi PWM dalam range yang aman
+        pwm_kiri = max(25, min(90, pwm_kiri))
+        pwm_kanan = max(25, min(90, pwm_kanan))
+        
+        return int(pwm_kiri), int(pwm_kanan)
+
+    def send_motor_commands(self, pwm_kiri, pwm_kanan):
+        """Kirim perintah motor via serial"""
+        if self.ser:
+            try:
+                cmd = f"{pwm_kiri},{pwm_kanan}\n"
+                self.ser.write(cmd.encode())
+                self.ser.flush()
+            except Exception as e:
+                print(f"[SERIAL ERROR] {e}")
+
+    def run(self):
+        """Main loop yang dioptimasi"""
+        print("[INFO] Memulai line follower...")
+        
+        # Mulai thread capture
+        self.capture_thread.start()
+        
+        frame_count = 0
+        fps_time = time.time()
+        
+        try:
+            while self.running:
+                # Ambil frame terbaru dari queue
+                if not self.image_queue.empty():
+                    frame = self.image_queue.get()
+                    
+                    # Process image
+                    binary_roi, roi_offset = self.process_image_optimized(frame)
+                    
+                    # Deteksi posisi garis
+                    line_detected, cx = self.calculate_line_position_optimized(binary_roi)
+                    
+                    if line_detected:
+                        # Hitung error relatif terhadap center
+                        center_x = frame.shape[1] // 2
+                        error = cx - center_x
+                        delta_error = error - self.prev_error
+                        
+                        # Fuzzy control
+                        kontrol = self.compute_fuzzy_control(error, delta_error)
+                        
+                        # Hitung PWM motor
+                        pwm_kiri, pwm_kanan = self.calculate_motor_pwm_smooth(kontrol)
+                        
+                        # Kirim perintah motor
+                        self.send_motor_commands(pwm_kiri, pwm_kanan)
+                        
+                        # Update state
+                        self.current_error = error
+                        self.prev_error = error
+                        self.line_detected = True
+                        
+                        # Debug info
+                        if frame_count % 15 == 0:
+                            direction = "LURUS" if abs(error) < 20 else ("KIRI" if error < 0 else "KANAN")
+                            print(f"[DEBUG] E:{error:4d} | FLC:{kontrol:6.2f} | PWM L:{pwm_kiri} R:{pwm_kanan} | {direction}")
+                    
+                    else:
+                        # Garis tidak terdeteksi
+                        self.send_motor_commands(0, 0)
+                        self.line_detected = False
+                        if frame_count % 30 == 0:
+                            print("[WARN] Garis tidak terdeteksi - STOP")
+                    
+                    # Visualisasi (opsional, comment untuk performa maksimal)
+                    if frame_count % 5 == 0:  # Update display setiap 5 frame
+                        self.show_debug_display(frame, binary_roi, cx if line_detected else None)
+                    
+                    frame_count += 1
+                    
+                    # FPS monitoring
+                    if time.time() - fps_time > 5:
+                        fps = frame_count / (time.time() - fps_time)
+                        print(f"[INFO] FPS: {fps:.1f}")
+                        frame_count = 0
+                        fps_time = time.time()
+                
+                # Small delay untuk mencegah CPU overload
+                time.sleep(0.01)
+                
+        except KeyboardInterrupt:
+            print("\n[INFO] Dihentikan oleh pengguna")
+        finally:
+            self.cleanup()
+
+    def show_debug_display(self, frame, binary_roi, cx):
+        """Tampilan debug (opsional)"""
+        try:
+            # Tampilkan frame dengan overlay
+            display_frame = frame.copy()
+            h, w = frame.shape[:2]
+            
+            # Garis tengah referensi
+            cv2.line(display_frame, (w//2, 0), (w//2, h), (0, 255, 0), 1)
+            
+            # ROI boundary
+            roi_y = int(h * 0.7)
+            cv2.line(display_frame, (0, roi_y), (w, roi_y), (255, 0, 0), 1)
+            
+            # Posisi garis terdeteksi
+            if cx is not None:
+                cv2.circle(display_frame, (cx, roi_y + binary_roi.shape[0]//2), 3, (0, 0, 255), -1)
+                
+            # Status info
+            status = f"Line: {'OK' if self.line_detected else 'NO'} | Error: {self.current_error}"
+            cv2.putText(display_frame, status, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # Tampilkan
+            cv2.imshow("Line Follower", cv2.resize(display_frame, (320, 240)))
+            cv2.imshow("Binary ROI", cv2.resize(binary_roi, (320, 60)))
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self.running = False
+        except:
+            pass  # Ignore display errors
+
+    def cleanup(self):
+        """Cleanup resources"""
+        print("[INFO] Membersihkan resources...")
+        self.running = False
+        
+        # Stop motors
+        self.send_motor_commands(0, 0)
+        
+        # Close serial
+        if self.ser:
+            self.ser.close()
+            
+        # Stop camera
+        if self.picam2:
+            self.picam2.stop()
+            
+        # Close windows
+        cv2.destroyAllWindows()
+        
+        print("[INFO] Program selesai")
 
 def main():
-    fuzzy_ctrl = setup_fuzzy_logic()
-    picam2 = setup_camera()
-    ser = setup_serial()
-    error_filter = ErrorFilter(window_size=3)  # Kembalikan smoothing untuk gerakan halus
-
-    prev_error = 0
-    frame_count = 0
-
-    try:
-        while True:
-            frame = picam2.capture_array()
-            gray, binary, roi = process_image(frame)
-
-            line_detected, cx, cy = calculate_line_position(roi)
-            if line_detected:
-                error = cx - 160
-                error = error_filter.filter_error(error)
-                delta_error = error - prev_error
-                prev_error = error
-
-                kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
-                pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
-                send_motor_commands(ser, pwm_kiri, pwm_kanan)
-
-                if frame_count % 15 == 0:  # Kurangi monitoring untuk mengurangi noise
-                    print(f"[DEBUG] Error: {error:4d}, Delta: {delta_error:4d}, FLC: {kontrol:6.2f}, PWM: L{pwm_kiri} R{pwm_kanan}")
-                    if abs(error) < 10:
-                        print(f"[GOOD]  Jalur lurus stabil: {error}")  # Feedback positif untuk jalur lurus
-            else:
-                send_motor_commands(ser, 0, 0)
-                if frame_count % 20 == 0:
-                    print("[DEBUG] Garis tidak terdeteksi")
-
-            # Tampilkan tampilan real-time untuk analisis
-            frame_with_line = frame.copy()
-            cv2.line(frame_with_line, (160, 160), (160, 240), (0, 255, 0), 2)
-            if line_detected:
-                cv2.circle(frame_with_line, (cx, cy), 5, (0, 0, 255), -1)
-                # Tambah indikator error
-                cv2.putText(frame_with_line, f"E:{error}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-            cv2.imshow("Camera View", frame_with_line)
-            cv2.imshow("Threshold ROI", roi)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-            frame_count += 1
-            time.sleep(0.04)  # Sedikit perlambat untuk stabilitas
-    except KeyboardInterrupt:
-        print("\n[INFO] Dihentikan oleh pengguna")
-    finally:
-        send_motor_commands(ser, 0, 0)
-        if ser:
-            ser.close()
-        picam2.stop()
-        cv2.destroyAllWindows()
-        print("[INFO] Program selesai")
+    """Main function"""
+    follower = OptimizedLineFollower()
+    follower.run()
 
 if __name__ == "__main__":
     main()
