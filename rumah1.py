@@ -5,57 +5,43 @@ import time
 import serial
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+from datetime import datetime
 
 class ErrorFilter:
     def __init__(self, window_size=3):
         self.window_size = window_size
         self.error_history = []
-        self.alpha = 0.7  # Parameter untuk exponential smoothing
 
     def filter_error(self, error):
-        # Kombinasi moving average dan exponential smoothing
         self.error_history.append(error)
         if len(self.error_history) > self.window_size:
             self.error_history.pop(0)
-        
-        # Moving average
-        avg_error = sum(self.error_history) / len(self.error_history)
-        
-        # Exponential smoothing untuk mengurangi noise
-        if len(self.error_history) > 1:
-            prev_avg = sum(self.error_history[:-1]) / len(self.error_history[:-1])
-            smoothed_error = self.alpha * avg_error + (1 - self.alpha) * prev_avg
-        else:
-            smoothed_error = avg_error
-            
-        return int(smoothed_error)
+        return int(sum(self.error_history) / len(self.error_history))
 
-def setup_fuzzy_logic():
-    # Universe disesuaikan dengan kebutuhan obstacle avoidance
+def setup_fuzzy_logic_stronger():
     error = ctrl.Antecedent(np.arange(-200, 201, 1), 'error')
     delta = ctrl.Antecedent(np.arange(-150, 151, 1), 'delta')
     output = ctrl.Consequent(np.arange(-150, 151, 1), 'output')
 
-    # Membership functions yang lebih smooth untuk obstacle avoidance
-    error['NL'] = fuzz.trimf(error.universe, [-200, -150, -60])
-    error['NS'] = fuzz.trimf(error.universe, [-90, -35, -5])
-    error['Z']  = fuzz.trimf(error.universe, [-15, 0, 15])      # Zona netral diperlebar
-    error['PS'] = fuzz.trimf(error.universe, [5, 35, 90])
-    error['PL'] = fuzz.trimf(error.universe, [60, 150, 200])
+    # Membership functions
+    error['NL'] = fuzz.trimf(error.universe, [-200, -200, -60])
+    error['NS'] = fuzz.trimf(error.universe, [-100, -40, -5])
+    error['Z']  = fuzz.trimf(error.universe, [-30, 0, 30])
+    error['PS'] = fuzz.trimf(error.universe, [5, 40, 100])
+    error['PL'] = fuzz.trimf(error.universe, [60, 200, 200])
 
-    delta['NL'] = fuzz.trimf(delta.universe, [-150, -80, -30])
-    delta['NS'] = fuzz.trimf(delta.universe, [-50, -20, -3])
-    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])      # Zona netral diperlebar
-    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 50])
-    delta['PL'] = fuzz.trimf(delta.universe, [30, 80, 150])
+    delta['NL'] = fuzz.trimf(delta.universe, [-150, -150, -40])
+    delta['NS'] = fuzz.trimf(delta.universe, [-60, -20, -3])
+    delta['Z']  = fuzz.trimf(delta.universe, [-15, 0, 15])
+    delta['PS'] = fuzz.trimf(delta.universe, [3, 20, 60])
+    delta['PL'] = fuzz.trimf(delta.universe, [40, 150, 150])
 
-    output['L']  = fuzz.trimf(output.universe, [-150, -100, -60])
-    output['LS'] = fuzz.trimf(output.universe, [-75, -35, -8])
-    output['Z']  = fuzz.trimf(output.universe, [-12, 0, 12])    
-    output['RS'] = fuzz.trimf(output.universe, [8, 35, 75])
-    output['R']  = fuzz.trimf(output.universe, [60, 100, 150])
+    output['L']  = fuzz.trimf(output.universe, [-150, -150, -60])
+    output['LS'] = fuzz.trimf(output.universe, [-80, -30, -10])
+    output['Z']  = fuzz.trimf(output.universe, [-10, 0, 10])
+    output['RS'] = fuzz.trimf(output.universe, [10, 30, 80])
+    output['R']  = fuzz.trimf(output.universe, [60, 150, 150])
 
-    # Rules yang sama
     rules = [
         ctrl.Rule(error['NL'] & delta['NL'], output['L']),
         ctrl.Rule(error['NL'] & delta['NS'], output['LS']),
@@ -84,7 +70,7 @@ def setup_fuzzy_logic():
         ctrl.Rule(error['PL'] & delta['NL'], output['Z']),
         ctrl.Rule(error['PL'] & delta['NS'], output['Z']),
         ctrl.Rule(error['PL'] & delta['Z'], output['RS']),
-        ctrl.Rule(error['PL'] & delta['PS'], output['RS']),
+        ctrl.Rule(error['PL'] & delta['PS'], output['R']),
         ctrl.Rule(error['PL'] & delta['PL'], output['R']),
     ]
 
@@ -100,10 +86,8 @@ def setup_camera():
 
 def setup_serial():
     try:
-        # Sesuaikan dengan baudrate ESP32 (115200)
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
-        print("[UART] Port serial berhasil dibuka - ESP32 Ready")
-        time.sleep(2)  # Beri waktu ESP32 untuk siap
+        ser = serial.Serial('/dev/serial0', 115200, timeout=1)
+        print("[UART] Port serial berhasil dibuka")
         return ser
     except Exception as e:
         print(f"[UART ERROR] Gagal membuka serial port: {e}")
@@ -129,72 +113,63 @@ def calculate_line_position(roi):
 
 def compute_fuzzy_control(fuzzy_ctrl, error_val, delta_error):
     try:
-        fuzzy_ctrl.input['error'] = np.clip(error_val, -200, 200)
-        fuzzy_ctrl.input['delta'] = np.clip(delta_error, -150, 150)
+        fuzzy_ctrl.input['error'] = max(-200, min(200, error_val))
+        fuzzy_ctrl.input['delta'] = max(-150, min(150, delta_error))
         fuzzy_ctrl.compute()
         return np.clip(fuzzy_ctrl.output['output'], -150, 150)
     except Exception as e:
         print(f"[FLC ERROR] {e}")
         return 0.0
 
-def calculate_motor_pwm(kontrol, base_pwm=50, scaling_factor=0.3):
-    # Sesuaikan dengan ESP32 PWM range (0-100)
+def calculate_motor_pwm(kontrol, base_pwm=55, scaling_factor=0.4):
+    # Logika koreksi diperbaiki: kontrol (+) = garis kanan = motor kanan lebih cepat
     kontrol_scaled = kontrol * scaling_factor
-    pwm_kiri = base_pwm + kontrol_scaled
-    pwm_kanan = base_pwm - kontrol_scaled
-    
-    # PWM range untuk ESP32 (0-100), dengan minimum untuk torsi
-    pwm_kiri = max(30, min(80, pwm_kiri))  
-    pwm_kanan = max(30, min(80, pwm_kanan))
+    pwm_kiri = base_pwm + kontrol_scaled   # motor kiri lambat saat belok kiri
+    pwm_kanan = base_pwm - kontrol_scaled  # motor kanan lambat saat belok kanan
+    pwm_kiri = max(40, min(70, pwm_kiri))
+    pwm_kanan = max(40, min(70, pwm_kanan))
     return int(pwm_kiri), int(pwm_kanan)
 
 def send_motor_commands(ser, pwm_kiri, pwm_kanan):
     if ser:
         try:
-            # Format sesuai dengan ESP32: "pwm_kiri,pwm_kanan\n"
             cmd = f"{pwm_kiri},{pwm_kanan}\n"
-            ser.write(cmd.encode('utf-8'))
+            ser.write(cmd.encode())
             ser.flush()
         except Exception as e:
             print(f"[SERIAL ERROR] {e}")
 
-def handle_emergency_stop(ser):
-    """Fungsi untuk menghentikan motor dalam keadaan darurat"""
-    if ser:
-        try:
-            ser.write("0,0\n".encode('utf-8'))
-            ser.flush()
-            print("[EMERGENCY] Motor dihentikan")
-        except:
-            pass
+def draw_simple_overlay(frame, error, kontrol, cx):
+    text = f"Err:{error:3d} | Ctrl: {kontrol:5.1f}"
+    cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    center_x = frame.shape[1] // 2
+    cv2.line(frame, (center_x, 0), (center_x, frame.shape[0]), (255, 0, 0), 2)
+    cv2.rectangle(frame, (0, 160), (frame.shape[1], 240), (0, 255, 255), 2)
+    if cx > 0:
+        cv2.circle(frame, (cx, 200), 6, (0, 0, 255), -1)
+    return frame
 
 def main():
-    print("[INFO] Inisialisasi sistem Line Following dengan Obstacle Avoidance...")
-    
-    fuzzy_ctrl = setup_fuzzy_logic()
+    print("[SYSTEM] Starting Robot Line Follower v2")
+
+    fuzzy_ctrl = setup_fuzzy_logic_stronger()
     picam2 = setup_camera()
     ser = setup_serial()
-    error_filter = ErrorFilter(window_size=3)
-
-    if not ser:
-        print("[ERROR] Tidak dapat melanjutkan tanpa koneksi serial")
-        return
+    error_filter = ErrorFilter()
 
     prev_error = 0
     frame_count = 0
-    lost_line_count = 0
-    max_lost_frames = 10  # Berapa frame boleh kehilangan garis
+
+    cv2.namedWindow('Line Follower', cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow('ROI', cv2.WINDOW_AUTOSIZE)
 
     try:
-        print("[INFO] Sistem siap - Tekan 'q' untuk keluar")
         while True:
             frame = picam2.capture_array()
             gray, binary, roi = process_image(frame)
-
             line_detected, cx, cy = calculate_line_position(roi)
-            
+
             if line_detected:
-                lost_line_count = 0  # Reset counter
                 error = cx - 160
                 error = error_filter.filter_error(error)
                 delta_error = error - prev_error
@@ -202,64 +177,35 @@ def main():
 
                 kontrol = compute_fuzzy_control(fuzzy_ctrl, error, delta_error)
                 pwm_kiri, pwm_kanan = calculate_motor_pwm(kontrol)
+
                 send_motor_commands(ser, pwm_kiri, pwm_kanan)
 
-                # Debug output yang lebih informatif
-                if frame_count % 15 == 0:
-                    status = "STRAIGHT" if abs(error) < 15 else ("LEFT" if error < 0 else "RIGHT")
-                    print(f"[{status}] E:{error:4d} | D:{delta_error:4d} | FLC:{kontrol:6.2f} | PWM: L{pwm_kiri} R{pwm_kanan}")
-                    
+                if frame_count % 20 == 0:
+                    print(f"[DEBUG] Error: {error}, Delta: {delta_error}, FLC: {kontrol:.2f}, PWM: {pwm_kiri},{pwm_kanan}")
             else:
-                lost_line_count += 1
-                if lost_line_count >= max_lost_frames:
-                    # Berhenti jika terlalu lama kehilangan garis
-                    send_motor_commands(ser, 0, 0)
-                    if frame_count % 20 == 0:
-                        print("[WARNING] Garis hilang - Motor dihentikan")
-                else:
-                    # Tetap gunakan kontrol terakhir untuk beberapa frame
-                    if frame_count % 30 == 0:
-                        print(f"[SEARCHING] Mencari garis... ({lost_line_count}/{max_lost_frames})")
+                send_motor_commands(ser, 0, 0)
+                if frame_count % 20 == 0:
+                    print("[DEBUG] Garis tidak terdeteksi")
 
-            # Display untuk monitoring
-            frame_with_overlay = frame.copy()
-            cv2.line(frame_with_overlay, (160, 160), (160, 240), (0, 255, 0), 2)
-            
-            if line_detected:
-                cv2.circle(frame_with_overlay, (cx, cy), 5, (0, 0, 255), -1)
-                # Status indicator
-                color = (0, 255, 0) if abs(error) < 15 else (0, 255, 255)
-                cv2.putText(frame_with_overlay, f"Error: {error}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            else:
-                cv2.putText(frame_with_overlay, "LINE LOST!", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            frame_overlay = draw_simple_overlay(frame.copy(), error if line_detected else 0, kontrol if line_detected else 0, cx if line_detected else 0)
+            roi_display = cv2.resize(roi, (320, 160))
+            cv2.imshow('Line Follower', frame_overlay)
+            cv2.imshow('ROI', roi_display)
 
-            # Obstacle status (informasi dari ESP32 akan tampil di serial monitor ESP32)
-            cv2.putText(frame_with_overlay, "Obstacle Check: ESP32", (10, 220), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-
-            cv2.imshow("Line Following + Obstacle Avoidance", frame_with_overlay)
-            cv2.imshow("Binary ROI", roi)
-            
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
             frame_count += 1
-            time.sleep(0.05)  # 20 FPS - sesuai dengan ESP32 sensor timing
-            
+            time.sleep(0.05)
+
     except KeyboardInterrupt:
-        print("\n[INFO] Dihentikan oleh pengguna")
-    except Exception as e:
-        print(f"[ERROR] {e}")
+        print("[SYSTEM] Keyboard interrupt")
     finally:
-        print("[INFO] Membersihkan sistem...")
-        handle_emergency_stop(ser)
-        if ser:
-            ser.close()
+        send_motor_commands(ser, 0, 0)
+        if ser: ser.close()
         picam2.stop()
         cv2.destroyAllWindows()
-        print("[INFO] Program selesai dengan aman")
+        print("[SYSTEM] Shutdown complete")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
